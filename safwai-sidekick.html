@@ -128,42 +128,75 @@ function hydrateContext(extracted, contacts, opps, kanban) {
   const { names = [], keywords = [] } = extracted;
   const matches = { contacts: [], opps: [], cards: [] };
 
+  // Fuzzy match helper — checks if any token in needle appears in haystack
+  // Handles abbreviations: "ibsc" matches "ibsp ai sig" by prefix (ibs*)
+  const fuzzyMatch = (hay, terms) => terms.some(term => {
+    const t = term.toLowerCase().trim();
+    if (!t || t.length < 2) return false;
+    if (hay.includes(t)) return true;
+    // prefix match: "ibsc" matches "ibsp" (first 3 chars match)
+    if (t.length >= 3) {
+      const prefix = t.slice(0, Math.min(t.length - 1, 4));
+      const words = hay.split(/\s+/);
+      if (words.some(w => w.startsWith(prefix))) return true;
+    }
+    return false;
+  });
+
   // Match contacts — by name fragments
   contacts.forEach(c => {
     const hay = (c.name + ' ' + (c.company||'')).toLowerCase();
-    if (names.some(n => hay.includes(n.toLowerCase()))) matches.contacts.push(c);
+    if (fuzzyMatch(hay, names)) matches.contacts.push(c);
   });
 
   // Match opps — by name or company
   opps.forEach(o => {
     const hay = (o.name + ' ' + (o.company||'')).toLowerCase();
-    const nameHit = names.some(n => hay.includes(n.toLowerCase()));
-    const kwHit = keywords.some(k => hay.includes(k.toLowerCase()));
-    // Also match if linked contact already matched
+    const nameHit = fuzzyMatch(hay, names);
+    const kwHit = fuzzyMatch(hay, keywords);
     const contactHit = matches.contacts.some(c => c.id === o.contactId);
     if (nameHit || kwHit || contactHit) matches.opps.push(o);
   });
 
-  // Match kanban cards — by title or notes keywords
-  kanban.filter(c => c.col !== 'done').forEach(card => {
-    const hay = (card.title + ' ' + (card.notes||'')).toLowerCase();
-    const nameHit = names.some(n => hay.includes(n.toLowerCase()));
-    const kwHit = keywords.some(k => hay.includes(k.toLowerCase()));
-    if (nameHit || kwHit) matches.cards.push(card);
+  // Match kanban cards — fuzzy match on title+notes
+  // ALWAYS include all inview + doing cards (coach needs board visibility)
+  const activeCards = kanban.filter(c => c.col !== 'done');
+  const alwaysInclude = activeCards.filter(c => c.col === 'inview' || c.col === 'doing');
+  const backlogMatches = activeCards.filter(c => c.col === 'backlog' && (
+    fuzzyMatch((c.title + ' ' + (c.notes||'')).toLowerCase(), names) ||
+    fuzzyMatch((c.title + ' ' + (c.notes||'')).toLowerCase(), keywords) ||
+    matches.contacts.some(mc => c.contactId === mc.id) ||
+    matches.opps.some(mo => c.oppId === mo.id)
+  ));
+  // Deduplicate
+  const seenIds = new Set();
+  [...alwaysInclude, ...backlogMatches].forEach(card => {
+    if (!seenIds.has(card.id)) { seenIds.add(card.id); matches.cards.push(card); }
   });
 
   if (!matches.contacts.length && !matches.opps.length && !matches.cards.length) return '';
 
+  const colOrder = {inview:0, doing:1, backlog:2};
+  matches.cards.sort((a,b) => (colOrder[a.col]??9) - (colOrder[b.col]??9));
+
   const lines = ['--- Relevant context for this message ---'];
-  matches.contacts.forEach(c => {
-    lines.push(`Contact: ${c.name}${c.company?' ('+c.company+')':''} | Last contact: ${c.lastContact||'unknown'} | Next action: ${c.nextAction||'none'}`);
-  });
-  matches.opps.forEach(o => {
-    lines.push(`Opportunity: ${o.name} | Stage: ${o.stage||'unknown'} | Value: ${o.value?'$'+o.value:'unknown'} | Next action: ${o.nextAction||'none'}`);
-  });
-  matches.cards.forEach(card => {
-    lines.push(`Kanban task [${card.col}]: ${card.title}${card.notes?' — '+card.notes:''}`);
-  });
+  if (matches.contacts.length) {
+    matches.contacts.forEach(c => {
+      lines.push(`Contact: ${c.name}${c.company?' ('+c.company+')':''} | Last contact: ${c.lastContact||'unknown'} | Next action: ${c.nextAction||'none'}`);
+    });
+  }
+  if (matches.opps.length) {
+    matches.opps.forEach(o => {
+      lines.push(`Opportunity: ${o.name} | Stage: ${o.stage||'unknown'} | Value: ${o.value?'$'+o.value:'unknown'} | Next action: ${o.nextAction||'none'}`);
+    });
+  }
+  if (matches.cards.length) {
+    lines.push('Kanban board (active tasks):');
+    matches.cards.forEach(card => {
+      const prio = card.priority === 'critical' ? '🔴' : card.priority === 'high' ? '🟠' : '⚪';
+      lines.push(`  ${prio} [${card.col.toUpperCase()}] ${card.title}${card.notes?' — '+card.notes:''}`);
+    });
+  }
   lines.push('--- End context ---');
   return lines.join('\n');
 }
@@ -1129,13 +1162,13 @@ function SAFWAISidekick() {
       }
 
       // 3. Build prompt for routed agent (with hydrated context)
-      const prompt = buildCoachPrompt(memories, route, ctx);
+      const prompt = buildCoachPrompt(memoriesRef.current, route, ctx);
       const reply = await apiCall(M.main, prompt, history.map(m=>`${m.role==='user'?'User':'Coach'}: ${m.content}`).join('\n\n'), 1000);
       const final = [...history, {role:'assistant', content:reply}];
       setMessages(final);
       saveChat('coach', final); // always save under 'coach' key — single conversation
       // Background orchestration — non-blocking
-      backgroundOrch(msg, reply, memories, contacts, opps);
+      backgroundOrch(msg, reply, memoriesRef.current, contactsRef.current, oppsRef.current);
     } catch(e) {
       const msg = e.message === 'NO_KEY'
         ? '⚠ No API key set. Go to 🧠 Memory tab to add your Anthropic API key.'
