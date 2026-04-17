@@ -1,0 +1,18 @@
+{
+  "name": "SAFWAI Sidekick",
+  "short_name": "Sidekick",
+  "description": "Personal coach, pipeline, memory — Jeroen's operating system",
+  "start_url": "./safwai-sidekick.html",
+  "display": "standalone",
+  "background_color": "#f4f1ed",
+  "theme_color": "#c85a18",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='115' fill='%23c85a18'/><text y='370' x='60' font-size='380' fill='white'>◎</text></svg>",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

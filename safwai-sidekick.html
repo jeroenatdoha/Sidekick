@@ -1,0 +1,2173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <meta name="theme-color" content="#f4f1ed"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="default"/>
+  <meta name="apple-mobile-web-app-title" content="Sidekick"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <title>SAFWAI Sidekick</title>
+  <link rel="manifest" href="manifest.json"/>
+
+  <!-- PWA icon fallback via inline SVG favicon -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%23c85a18'/><text y='.9em' font-size='70' x='12'>◎</text></svg>"/>
+
+  <!-- React + Babel via CDN -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%;
+      background: #f4f1ed;
+      color: #1a1512;
+      overscroll-behavior: none;
+      -webkit-text-size-adjust: 100%;
+    }
+    #root { height: 100%; display: flex; flex-direction: column; }
+
+    /* localStorage-based storage shim — same API as window.storage in Claude artifacts */
+    /* Data persists in this browser permanently — no export/import needed between builds */
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════
+   STORAGE SHIM — replaces window.storage (Claude artifact API)
+   with localStorage so data persists permanently in the browser
+═══════════════════════════════════════════════════════════════ */
+window.storage = {
+  get: async (key) => {
+    try {
+      const val = localStorage.getItem('safwai_' + key);
+      if (val === null) throw new Error('Not found');
+      return { key, value: val, shared: false };
+    } catch(e) { throw e; }
+  },
+  set: async (key, value) => {
+    try {
+      localStorage.setItem('safwai_' + key, value);
+      return { key, value, shared: false };
+    } catch(e) { throw e; }
+  },
+  delete: async (key) => {
+    localStorage.removeItem('safwai_' + key);
+    return { key, deleted: true, shared: false };
+  },
+  list: async (prefix) => {
+    const keys = Object.keys(localStorage)
+      .filter(k => k.startsWith('safwai_' + (prefix || '')))
+      .map(k => k.replace('safwai_', ''));
+    return { keys, prefix, shared: false };
+  }
+};
+</script>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+
+
+/* ═══════════════════════════════════════════════════════════════
+   STORAGE KEYS
+═══════════════════════════════════════════════════════════════ */
+const SK = {
+  memory:        'jeroen-adhd-coach-v2',
+  contacts:      'crm-contacts-v2',
+  opps:          'crm-opps-v2',
+  log:           'orchestrator-log-v1',
+  projects:      'safwai-projects-v1',
+  interactions:  'safwai-interactions-v1',
+  chats:         'safwai-chats-v1',
+  kanban:        'safwai-kanban-v1'
+};
+
+/* ═══════════════════════════════════════════════════════════════
+   MODELS
+═══════════════════════════════════════════════════════════════ */
+const M = {
+  main:  'claude-sonnet-4-6',           // Coach conversations
+  fast:  'claude-haiku-4-5-20251001'    // Background agents
+};
+
+/* ═══════════════════════════════════════════════════════════════
+   JEROEN CONTEXT
+═══════════════════════════════════════════════════════════════ */
+const JC = `Jeroen Hendriks. Dutch, 54, Doha Qatar. Practising Muslim. Married to Laila. Daughters Aya (9), Maysa (5).
+Recently diagnosed ADHD. Primary challenge: task paralysis. Coaching: direct + warm, no fluff.
+Entrepreneur without cashflow — income generation is urgent priority #1. Family expenses exceed Laila's income.
+Represents Gysho.com (enterprise agentic AI) in Middle East via SAFWAI AI LLC.
+Three income streams: Gysho deals, freelance contracts, fixed-term roles.
+MOI Qatar verbal job offer (Major Abdullah) — awaiting formal confirmation.
+Most active lead: Erik van der Steen (UAE) — enterprise C-suite AI coach on Gysho.`;
+
+/* ═══════════════════════════════════════════════════════════════
+   AGENT PROMPTS
+═══════════════════════════════════════════════════════════════ */
+const buildCoachPrompt = (mems, mode) => {
+  const mb = mems.length ? `\nMemories:\n${mems.slice(-15).map(m=>`- ${m.text}`).join('\n')}\n` : '';
+  if (mode === 'taskbreaker') return `You are a task paralysis specialist. One job: the tiniest possible first move.\n\n${JC}${mb}\nFormula:\n1. One sentence acknowledging the paralysis — make him feel seen\n2. THE single smallest first step — so specific it almost feels silly\n3. One sentence on why starting beats finishing\nMax 5 sentences. Movement only.`;
+  if (mode === 'braindump') return `You are a brain organiser. Transform mental chaos into clarity.\n\n${JC}${mb}\nALWAYS use this format:\n\n**Heard:** [core chaos in one sentence]\n\n**What matters today:**\n• [item 1]\n• [item 2]\n• [item 3 — only if urgent]\n\n**Batch or delegate:** [1-2 items that don't need your direct attention — or "None today"]\n\n**Start here →** [one concrete first action]`;
+  return `You are Jeroen's personal coach and business advisor. Warm, sharp, genuinely invested.\n\n${JC}${mb}\nPrinciples:\n→ Different operating system, not defective — task paralysis is neurological, not weakness\n→ 54-year late diagnosis = a lifetime of confusion now making sense\n→ If an email or content is shared, recommend next steps AND flag CRM relevance\n\nCRITICAL — be honest about what auto-updates:\n→ Memory insights: YES, extracted automatically after every exchange\n→ Contact next actions + last contact date: YES, updated automatically when a contact is discussed\n→ Pipeline stage changes: YES, if you explicitly mention a deal moving\n→ Project status: YES, if you mention a project progressing\n→ Activities (real-world calls/meetings/emails with people): PARTIAL — detected automatically when user DESCRIBES a real interaction. But if it's unclear, say "I'll add a Log Activity button so you can confirm this in one tap" — do NOT say you logged it if you're not certain.\n\nRespond:\n• SHORT — 3-5 sentences. Busy brain needs brevity.\n• ONE clear action or insight\n• Direct and warm. Zero filler.\n• Never claim to have logged an activity unless the user clearly described a real-world interaction in this message.\n• If you're unsure whether something should be logged as an activity, say so and prompt the user to confirm.`;
+};
+
+const ROUTER_P = `You are a routing agent. Read a user message and decide which specialist agent should handle it.
+
+Agents available:
+- "coach" — general coaching, advice, thinking through problems, sharing news, asking questions, sharing emails or messages
+- "taskbreaker" — user is explicitly stuck on starting a specific task and needs the smallest possible first step
+- "braindump" — user wants to dump everything on their mind and get structured clarity
+
+Return ONLY one word: coach, taskbreaker, or braindump. Nothing else.`;
+
+const MEMORY_EXTRACTOR_P = `You are a memory extraction agent. Read a coaching exchange and extract durable insights worth remembering about Jeroen, his business, relationships, or psychology. Return ONLY a JSON array of concise third-person strings (max 25 words each). Extract 0-5 insights. Only what is genuinely durable — not transient facts. If nothing worth saving: []. No markdown.`;
+
+const CRM_SCANNER_P = `You are a CRM update agent. Read a coaching exchange and detect any real-world updates worth recording.
+
+IMPORTANT — Activities are ONLY real-world interactions with other people (calls, meetings, WhatsApp exchanges, emails sent/received). Do NOT log coach conversations as activities.
+
+Return ONLY a JSON object:
+{
+  "hasUpdates": true or false,
+  "contactUpdates": [{"contactName":"name of person discussed","summary":"what happened in the real world","sentiment":"positive|neutral|negative|mixed","nextAction":"specific next action or null","situationUpdate":"any change to their situation or null"}],
+  "opportunityUpdates": [{"oppName":"name or description of the deal/opportunity","stageUpdate":"new stage or null — only if explicitly mentioned e.g. deal confirmed, lost, meeting booked","nextAction":"updated next action or null","notes":"what changed"}],
+  "projectUpdates": [{"projectName":"name of project mentioned","statusUpdate":"not_started|in_progress|ongoing|planned|done — only if status clearly changed","nextAction":"updated next action or null","notes":"what changed"}],
+  "realWorldActivities": [{"contactName":"name","type":"call|meeting|whatsapp|email","summary":"what happened — real world interaction only","sentiment":"positive|neutral|negative|mixed","nextAction":"follow-up action"}],
+  "allNamesDetected": ["every real person's name mentioned in the exchange — include all, known or unknown"],
+  "allOppsDetected": ["every deal, lead, or commercial opportunity mentioned — include all"],
+  "memories": ["durable insight worth saving"]
+}
+If nothing relevant, return {"hasUpdates":false,"contactUpdates":[],"opportunityUpdates":[],"projectUpdates":[],"realWorldActivities":[],"allNamesDetected":[],"allOppsDetected":[],"memories":[]}. No markdown.`;
+
+const ORCHESTRATOR_P = `You are the orchestrator for Jeroen's Sidekick. Read any input (WhatsApp, email, call notes, transcript) and produce a routing plan.
+
+${JC}
+
+Extract everything worth capturing. Return ONLY valid JSON:
+{
+  "summary":"one sentence what happened and why it matters",
+  "contactsInvolved":["names of people involved"],
+  "opportunitiesInvolved":["deals or opportunities involved"],
+  "routeMemory":true,
+  "routeCRM":true,
+  "memories":["concise insight max 20 words"],
+  "contactUpdates":[{"contactName":"name","isNew":false,"summary":"2-3 sentences","sentiment":"positive|neutral|negative|mixed","keyInsights":["insight"],"nextAction":"specific action","situationUpdate":"or null"}],
+  "opportunityUpdates":[{"oppName":"name or description","isNew":false,"summary":"what changed","stageUpdate":"or null","nextAction":"action","notes":"update"}],
+  "adhocInsight":"a coaching insight triggered by this content, or null"
+}`;
+
+/* ═══════════════════════════════════════════════════════════════
+   SEED DATA
+═══════════════════════════════════════════════════════════════ */
+const SEED_C = [
+  {id:"c1",name:"Major Abdullah",company:"MOI Qatar",role:"Hiring Manager",geography:"Qatar",priority:"critical",lastContact:"2026-04-15",nextAction:"Await formal offer. Do not over-message.",relationship:"Via Hamad. Warm and responsive.",notes:"Verbal job offer for program management contract. CV + bio submitted 7 April. Hiring restarted. Status update sent 15 April.",opportunityIds:["o1"],interactions:[]},
+  {id:"c2",name:"Erik van der Steen",company:"Emirates Post Group",role:"Enterprise AI Advisor",geography:"UAE",priority:"high",lastContact:"2026-04-16",nextAction:"Await WhatsApp reply. Propose scoping call with Sander.",relationship:"Old Dutch network. Warm. Experimenting with Claude himself.",notes:"Finished Dubai Post assignment. Proposed enterprise C-suite AI coach — AI reading company data. Call 16 April very promising. WhatsApp sent.",opportunityIds:["o2","o9"],interactions:[]},
+  {id:"c3",name:"Saleh",company:"SDB",role:"Decision Maker",geography:"KSA",priority:"high",lastContact:"2026-04-16",nextAction:"Await response to 16 April rekindle.",relationship:"Met once. Professional distance appropriate.",notes:"$50k opp. Rekindle 16 April — professional, PoC-first, weeks not months. No response yet.",opportunityIds:["o3"],interactions:[]},
+  {id:"c4",name:"Mark Geerars",company:"BPT",role:"Decision Maker",geography:"Netherlands",priority:"high",lastContact:"2026-04-02",nextAction:"One short follow-up end of week.",relationship:"Old network. Ghosting since April 2.",notes:"$21k, 85% probability. Strong message sent 2 April. No reply 13+ days.",opportunityIds:["o4"],interactions:[]},
+  {id:"c5",name:"Jakob Smet",company:"Freelance D365 Consultant",role:"Partner / Connector",geography:"NL / Qatar",priority:"high",lastContact:"2026-04-16",nextAction:"Follow up post 16 April meeting. Agree one use case + prototype timeline.",relationship:"New network. Introduced IBSP group.",notes:"D365 expert. Meeting 16 April 16:00. Six agentic use cases explored.",opportunityIds:["o5"],interactions:[]},
+  {id:"c6",name:"Prof Nasrallah",company:"Qatar University",role:"Research Lead",geography:"Qatar",priority:"medium",lastContact:"2026-02-09",nextAction:"Nothing until September 2026.",relationship:"Professional. Websummit connection.",notes:"BioMed grant $75k submitted. Decision Sept 2026.",opportunityIds:["o6"],interactions:[]},
+  {id:"c7",name:"Ayman",company:"Doha Bank",role:"Compliance Contact",geography:"Qatar",priority:"medium",lastContact:"2026-01-15",nextAction:"Call as a friend. No pitch.",relationship:"Good friend.",notes:"Compliance AI $15k. Timing wrong post-conflict.",opportunityIds:["o7"],interactions:[]},
+  {id:"c8",name:"Hamad Al Mansoori",company:"Partner",role:"Channel Partner",geography:"Qatar",priority:"medium",lastContact:"2026-01-01",nextAction:"Keep warm. MOI now via Major Abdullah.",relationship:"Partner. Introduced MOI + Novitas.",notes:"Introduced key opportunities. Now bypassed for MOI.",opportunityIds:[],interactions:[]},
+  {id:"c9",name:"Mottie",company:"AI for Automotive",role:"Decision Maker",geography:"UAE",priority:"low",lastContact:"2026-04-10",nextAction:"Park. Check in 6 weeks.",relationship:"Warm but fading. Likely soft no.",notes:"$60k opp. In Netherlands, distracted.",opportunityIds:["o10"],interactions:[]},
+  {id:"c10",name:"Rita Jansen",company:"Dubai Dutch Business Council",role:"Chair",geography:"UAE",priority:"low",lastContact:"2025-11-01",nextAction:"Light touch when Legal AI content ready.",relationship:"Met Dubai Trade Mission.",notes:"Legal AI $100k CLTV, 5% probability. Not replying.",opportunityIds:["o11"],interactions:[]},
+  {id:"c11",name:"Mohamed",company:"QPMC",role:"Decision Maker",geography:"Qatar",priority:"high",lastContact:"2025-11-23",nextAction:"Follow up post-Ramadan on PoC status.",relationship:"Via Hamad. Advanced discussions.",notes:"IoT AI $1M CLTV, $200k expected. Multiple PoC companies. Al Salam Group ahead.",opportunityIds:["o12"],interactions:[]},
+  {id:"c12",name:"Sonia Harjani",company:"Sona",role:"Decision Maker",geography:"UAE",priority:"low",lastContact:"2025-11-24",nextAction:"2 more weeks then park.",relationship:"Dubai Trade Mission. Not replying.",notes:"Conv AI white label $30k CLTV. Called multiple times.",opportunityIds:["o13"],interactions:[]},
+  {id:"c13",name:"Amar Shubar",company:"Management Partners",role:"Founder",geography:"UAE",priority:"medium",lastContact:"2025-12-04",nextAction:"Follow up — ball in our court.",relationship:"Old network.",notes:"AI for consulting $25k CLTV.",opportunityIds:["o14"],interactions:[]},
+  {id:"c14",name:"Khaled Sadeddin",company:"QD SBG",role:"Decision Maker",geography:"Qatar",priority:"low",lastContact:"2025-12-03",nextAction:"Park — not AI-ready yet.",relationship:"New local network.",notes:"$2.5M CLTV potential. Not mature for AI.",opportunityIds:["o15"],interactions:[]},
+  {id:"c15",name:"Faraz",company:"Agent",role:"Agent",geography:"KSA",priority:"high",lastContact:"2025-11-01",nextAction:"Develop proposal for Taskeen KSA.",relationship:"Agent. Brought Taskeen KSA RFP.",notes:"Top priority RFP — Digital Transformation.",opportunityIds:["o16"],interactions:[]},
+];
+
+const SEED_O = [
+  {id:"o1",name:"MOI Program Management Contract",contactIds:["c1"],cltv:0,expectedValue:0,probability:70,stage:"6 - Proposed",proposition:"Program management contract role",geography:"Qatar",leadSource:"Partner (Hamad)",whereIsBall:"Ball in our court",nextAction:"Await formal HR confirmation",notes:"Verbal offer. Once inside, system opportunities may emerge.",interactions:[]},
+  {id:"o2",name:"Enterprise C-Suite AI Coach (Erik)",contactIds:["c2"],cltv:0,expectedValue:0,probability:30,stage:"2 - Exploring",proposition:"Enterprise AI coach reading company data",geography:"UAE",leadSource:"Old Network",whereIsBall:"Ball in their court",nextAction:"Await WhatsApp reply. Propose Sander scoping call.",notes:"Erik's idea — highly aligned with Gysho. Call 16 April very promising.",interactions:[]},
+  {id:"o3",name:"SDB Conversational AI (Saleh)",contactIds:["c3"],cltv:100000,expectedValue:50000,probability:25,stage:"9 - Lost / Rekindle",proposition:"Conversational AI",geography:"KSA",leadSource:"Old Network",whereIsBall:"Ball in their court",nextAction:"Await response to 16 April rekindle.",notes:"Rekindle attempt 16 April.",interactions:[]},
+  {id:"o4",name:"BPT AI for Consulting (Mark)",contactIds:["c4"],cltv:25000,expectedValue:21250,probability:85,stage:"4 - Qualified",proposition:"AI for Consulting",geography:"Netherlands",leadSource:"Old Network",whereIsBall:"Ball in their court",nextAction:"One short follow-up end of week.",notes:"Ghosting since April 2. 85% probability stalled.",interactions:[]},
+  {id:"o5",name:"D365 Agentic AI (Jakob)",contactIds:["c5"],cltv:15000,expectedValue:750,probability:5,stage:"4 - Qualified",proposition:"Agentic AI for D365 SI",geography:"NL/Qatar",leadSource:"Old Network",whereIsBall:"Ball in their court",nextAction:"Agree one use case + prototype timeline.",notes:"Meeting 16 April. Six use cases explored.",interactions:[]},
+  {id:"o6",name:"QU BioMed Research Grant",contactIds:["c6"],cltv:150000,expectedValue:75000,probability:50,stage:"5 - RFP received",proposition:"Data Science and ML",geography:"Qatar",leadSource:"Websummit",whereIsBall:"Ball in our court",nextAction:"Nothing until September 2026.",notes:"Submitted. Significant contribution. Sept decision.",interactions:[]},
+  {id:"o7",name:"Doha Bank Document Compliance",contactIds:["c7"],cltv:50000,expectedValue:15000,probability:20,stage:"4 - Qualified",proposition:"AI Document Compliance",geography:"Qatar",leadSource:"New Local Network",whereIsBall:"Ball in their court",nextAction:"Friendly call to Ayman.",notes:"Timing wrong post-conflict.",interactions:[]},
+  {id:"o8",name:"Novitas — MOI System",contactIds:["c8"],cltv:100000,expectedValue:60000,probability:60,stage:"6 - Proposed",proposition:"Basewise & contracting",geography:"Qatar",leadSource:"Partner (Hamad)",whereIsBall:"Meeting planned",nextAction:"Follow up on meeting.",notes:"Separate from contract job offer (o1).",interactions:[]},
+  {id:"o9",name:"Emirates Post Group (Erik)",contactIds:["c2"],cltv:50000,expectedValue:7500,probability:15,stage:"4 - Qualified",proposition:"TBC",geography:"UAE",leadSource:"Old Network",whereIsBall:"Ball in their court",nextAction:"Introduce to new finance leader post-Ramadan.",notes:"Separate from C-suite AI coach idea.",interactions:[]},
+  {id:"o10",name:"AI for Automotive (Mottie)",contactIds:["c9"],cltv:300000,expectedValue:60000,probability:20,stage:"4 - Qualified",proposition:"Conversational AI",geography:"UAE",leadSource:"Dubai Trade Mission",whereIsBall:"Ball in their court",nextAction:"Park 6 weeks.",notes:"Likely soft no.",interactions:[]},
+  {id:"o11",name:"Rita Jansen — Legal AI",contactIds:["c10"],cltv:100000,expectedValue:5000,probability:5,stage:"4 - Qualified",proposition:"Legal AI",geography:"UAE",leadSource:"Dubai Trade Mission",whereIsBall:"Ball in our court",nextAction:"Rekindle when Legal AI content ready.",notes:"Not replying.",interactions:[]},
+  {id:"o12",name:"QPMC — IoT AI Detection",contactIds:["c11"],cltv:1000000,expectedValue:200000,probability:20,stage:"6 - Proposed",proposition:"AI Vehicle Detection",geography:"Qatar",leadSource:"Partner (Hamad)",whereIsBall:"Ball in our court",nextAction:"Follow up post-Ramadan.",notes:"Multiple PoC companies. Public tender ahead.",interactions:[]},
+  {id:"o13",name:"Sona — Conv AI White Label",contactIds:["c12"],cltv:30000,expectedValue:3000,probability:10,stage:"4 - Qualified",proposition:"Conversational AI Whitelabeled",geography:"UAE",leadSource:"Dubai Trade Mission",whereIsBall:"Ball in their court",nextAction:"2 more weeks then park.",notes:"Not replying.",interactions:[]},
+  {id:"o14",name:"Management Partners — Consulting AI",contactIds:["c13"],cltv:25000,expectedValue:2500,probability:10,stage:"4 - Qualified",proposition:"AI for Consulting",geography:"UAE",leadSource:"Old Network",whereIsBall:"Ball in our court",nextAction:"Follow up.",notes:"Spoke with founder.",interactions:[]},
+  {id:"o15",name:"QD SBG — Agentic HR ERP",contactIds:["c14"],cltv:2500000,expectedValue:375000,probability:15,stage:"0 - Not qualified",proposition:"Agentic HR ERP",geography:"Qatar",leadSource:"New Local Network",whereIsBall:"Ball in their court",nextAction:"Park — not AI-ready. Revisit Q3.",notes:"Not mature enough for AI.",interactions:[]},
+  {id:"o16",name:"Taskeen KSA — Digital Transformation",contactIds:["c15"],cltv:0,expectedValue:0,probability:30,stage:"5 - RFP received",proposition:"Digital Transformation",geography:"KSA",leadSource:"Agent (Faraz)",whereIsBall:"Ball in our court",nextAction:"Develop proposal.",notes:"Top priority RFP.",interactions:[]},
+];
+
+/* ═══════════════════════════════════════════════════════════════
+   SEED PROJECTS
+═══════════════════════════════════════════════════════════════ */
+const SEED_PROJECTS = [
+  {id:"p1",name:"SAFWAI AI Website Update",status:"not_started",priority:"high",notes:"",nextAction:"Define scope and gather current assets"},
+  {id:"p2",name:"Gysho Marketing Campaign",status:"in_progress",priority:"high",notes:"LinkedIn primary channel. Based on Sander De Hoogh interviews (5 recorded).",nextAction:"Process Sander recordings into LinkedIn content"},
+  {id:"p3",name:"Job Applications",status:"ongoing",priority:"critical",notes:"Target: a few per week. Fixed-term roles in region + freelance via network.",nextAction:"Submit 2 applications this week"},
+  {id:"p4",name:"SAFWAI Sidekick App",status:"in_progress",priority:"high",notes:"MVP #1 Coach ✓ · MVP #2 Memory ✓ · MVP #3 CRM + Pipeline ✓ · MVP #4 Orchestrator ✓ · MVP #5 Unified App ✓ · MVP #6 Pipeline Views · MVP #7 Transcripts · MVP #8 Job tracker · MVP #9 Marketing · MVP #10 Outlook",principle:"AI for intelligence, JS for computation. Never pass lookup lists to AI. Extract with AI → match/filter with JS.",nextAction:"Run session import in Memory tab, then use daily as primary system"},
+  {id:"p5",name:"LinkedIn Profile Update",status:"in_progress",priority:"medium",notes:"Needs to reflect Gysho partnership, agentic AI expertise, Qatar base.",nextAction:"Draft updated summary section"},
+  {id:"p6",name:"Decommission Notion Pipeline",status:"planned",priority:"low",notes:"Decision made 16 April: manage pipeline entirely within SAFWAI Sidekick. Notion no longer needed as CRM. Keep Notion only for documents and longer-form content if needed.",nextAction:"Archive Notion pipeline database once Sidekick confirmed as daily driver"},
+  {id:"p7",name:"Voice Message Transcription (Whisper)",status:"planned",priority:"medium",notes:"Use OpenAI Whisper API to auto-transcribe WhatsApp voice messages (.opus files). Drop audio into Sidekick → transcribe → orchestrator processes automatically. $0.006/min. Accurate in Dutch, English, Arabic. For now: use WhatsApp built-in transcription (long-press → Transcribe) and paste into Inbox.",nextAction:"Scope Whisper API integration into Sidekick Inbox tab"},
+  {id:"p8",name:"Mobile Optimisation",status:"in_progress",priority:"high",notes:"Current app built for desktop. Mobile issues: 9 nav tabs too many, dense text, tight forms, small tap targets. Quick fixes: bottom nav bar, larger fonts, simplified views. Full solution: PWA or React Native for true mobile-native experience.",nextAction:"Quick mobile pass complete — full redesign next build session"},
+  {id:"p9",name:"Outlook Email Integration",status:"planned",priority:"high",notes:"IT environment locks Outlook save formats to MSG/EML only — no plain text export. Copy-paste is only current option but too much friction for daily use. Solution: Microsoft Graph API reads inbox directly. Select email in Sidekick → pulls sender, subject, date, body → feeds orchestrator automatically. No copy-paste needed.",nextAction:"Build Microsoft Graph API integration into Inbox tab — next build session"},
+];
+
+const KANBAN_COLS = ['backlog','inview','doing','done'];
+const KANBAN_COL_LABELS = {backlog:'Backlog',inview:'In View',doing:'Doing',done:'Done'};
+const KANBAN_COL_COLORS = {backlog:'#8a7a6a',inview:'#155878',doing:'#c85a18',done:'#1e6e30'};
+
+const SEED_KANBAN = [
+  // Pipeline actions
+  {id:"k1",title:"Follow up with Major Abdullah",col:"inview",theme:"pipeline",priority:"critical",contactId:"c1",oppId:"o1",notes:"Sent status update 15 April. 48-72hr window. Do not over-message.",createdAt:new Date().toISOString()},
+  {id:"k2",title:"Nudge Erik — IBSP differentiator + next step",col:"inview",theme:"pipeline",priority:"high",contactId:"c2",oppId:"o2",notes:"He made the enterprise vs consumer remark in IBSP meeting. Voice message sent on differentiators. Now nudge toward Sander call.",createdAt:new Date().toISOString()},
+  {id:"k3",title:"Await Saleh response",col:"inview",theme:"pipeline",priority:"high",contactId:"c3",oppId:"o3",notes:"Rekindle sent 16 April. Give it a week before following up again.",createdAt:new Date().toISOString()},
+  {id:"k4",title:"Short follow-up to Mark Geerars",col:"inview",theme:"pipeline",priority:"high",contactId:"c4",oppId:"o4",notes:"Ghosting since April 2. Keep it to one line. This week.",createdAt:new Date().toISOString()},
+  {id:"k5",title:"Follow up with Jakob post-meeting",col:"doing",theme:"pipeline",priority:"high",contactId:"c5",oppId:"o5",notes:"Meeting had 16 April. Agree one D365 use case and prototype timeline.",createdAt:new Date().toISOString()},
+  // Marketing / IBSP
+  {id:"k6",title:"Write IBSP AI SIG LinkedIn post",col:"doing",theme:"marketing",priority:"high",contactId:null,oppId:null,notes:"James asked within 24hrs. Inaugural meeting highlights + invite to join IBSP.",createdAt:new Date().toISOString()},
+  {id:"k7",title:"Lead IBSP AI SIG task force — organise first working session",col:"inview",theme:"marketing",priority:"medium",contactId:null,oppId:null,notes:"Confirmed as lead. Bob stepping back. Brian + Sander involved. Goal: solid base by end of year.",createdAt:new Date().toISOString()},
+  {id:"k8",title:"Articulate 5 D365 use cases as a document",col:"backlog",theme:"marketing",priority:"medium",contactId:null,oppId:null,notes:"Use IBSP transcript + Jakob meeting insights. Foundation for IBSP positioning.",createdAt:new Date().toISOString()},
+  // Projects
+  {id:"k9",title:"Run session import in Sidekick memory",col:"doing",theme:"project",priority:"high",contactId:null,oppId:null,notes:"Paste the 18-hour session summary. Seeds the Sidekick with all context from 16 April.",createdAt:new Date().toISOString()},
+  {id:"k10",title:"Build Sidekick PWA",col:"backlog",theme:"project",priority:"high",contactId:null,oppId:null,notes:"Full screen, home screen install, no Claude chrome. Solves mobile problem permanently. Plan: end of today or weekend.",createdAt:new Date().toISOString()},
+  {id:"k11",title:"Update LinkedIn profile",col:"backlog",theme:"project",priority:"medium",contactId:null,oppId:null,notes:"Reflect Gysho partnership, agentic AI expertise, IBSP AI SIG lead role.",createdAt:new Date().toISOString()},
+  {id:"k12",title:"Submit 2 job applications this week",col:"backlog",theme:"project",priority:"critical",contactId:null,oppId:null,notes:"Fixed-term roles in region + freelance via network.",createdAt:new Date().toISOString()},
+];
+
+/* ═══════════════════════════════════════════════════════════════
+   STORAGE HELPERS
+═══════════════════════════════════════════════════════════════ */
+async function sGet(key, fallback) {
+  try { const r = await window.storage.get(key); if (r?.value) return JSON.parse(r.value); } catch {}
+  return fallback;
+}
+async function sSet(key, val) {
+  try { await window.storage.set(key, JSON.stringify(val)); } catch(e) { console.error(e); }
+}
+function parseJ(raw) {
+  try { return JSON.parse(raw.replace(/```json|```/g,'').trim()); } catch { return null; }
+}
+async function apiCall(model, system, user, tokens=800) {
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ model, max_tokens:tokens, system, messages:[{role:"user",content:user}] })
+  });
+  if (!r.ok) throw new Error(`API ${r.status}`);
+  const d = await r.json();
+  return d.content?.[0]?.text?.trim() || '';
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   HELPERS
+═══════════════════════════════════════════════════════════════ */
+const daysSince = d => d ? Math.floor((Date.now()-new Date(d))/86400000) : 999;
+const prio = {critical:0,high:1,medium:2,low:3};
+const prioCol = {critical:"#e07030",high:"#c8903a",medium:"#68a87a",low:"#44403a"};
+const sentCol = {positive:"#68a87a",neutral:"#857a6a",negative:"#c05050",mixed:"#c8903a"};
+const stageCol = {"6 - Proposed":"#e07030","6 - Verbal offer":"#e07030","5 - RFP received":"#c8903a","5 - Submitted":"#c8903a","4 - Qualified":"#68a87a","3 - Meeting planned":"#5a8a9a","2 - Exploring":"#857a6a","9 - Lost / Rekindle":"#7a6a50","9 - Lost":"#c05050","1 - Prospect":"#4a4540","0 - Not qualified":"#2c2720"};
+
+function renderMd(text) {
+  return text.split(/(\*\*[^*]+\*\*)/g).map((p,i) =>
+    p.startsWith("**")&&p.endsWith("**") ? <strong key={i}>{p.slice(2,-2)}</strong> : p
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   DOHA CLOCK
+═══════════════════════════════════════════════════════════════ */
+function DohaClock() {
+  const [t, setT] = useState({time:'--:--:--', date:''});
+  useEffect(() => {
+    const tick = () => {
+      const n = new Date();
+      const d = new Date(n.toLocaleString('en-US',{timeZone:'Asia/Qatar'}));
+      setT({
+        time: `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`,
+        date: d.toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short',timeZone:'Asia/Qatar'})
+      });
+    };
+    tick(); const id = setInterval(tick,1000); return ()=>clearInterval(id);
+  },[]);
+  return (
+    <div style={{marginLeft:'auto',textAlign:'right',flexShrink:0}}>
+      <div style={{fontFamily:'var(--fm)',fontSize:'15px',color:'var(--accent)',letterSpacing:'1px',lineHeight:1}}>{t.time}</div>
+      <div style={{fontFamily:'var(--fm)',fontSize:'8px',color:'var(--text-muted)',letterSpacing:'.5px',marginTop:'1px'}}>DOHA · AST · UTC+3 · {t.date}</div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   CSS
+═══════════════════════════════════════════════════════════════ */
+const CSS = `
+  @import url('https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&display=swap');
+  html, body { background:#f4f1ed !important; color:#1a1512 !important; }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    color-scheme: light;
+    --bg:#f4f1ed;--surface:#ffffff;--surface2:#ebe7e1;
+    --border:#d0c8be;--accent:#c85a18;--accent-dim:#a04510;--accent-glow:rgba(200,90,24,.1);
+    --text:#1a1512;--text-dim:#4a3e34;--text-muted:#8a7a6a;
+    --green:#1e6e30;--red:#b02020;--gold:#8a5e08;--blue:#155878;
+    --fm:'JetBrains Mono','Courier New',monospace;
+    --fb:'Instrument Sans',system-ui,sans-serif;
+    --fd:'Crimson Pro',Georgia,serif;
+  }
+  .app{font-family:var(--fb);background:#f4f1ed !important;color:#1a1512 !important;height:100vh;display:flex;flex-direction:column;overflow:hidden;font-size:15px;color-scheme:light}
+  @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.3;transform:scale(.7)}}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+  .fade{animation:fadeUp .2s ease}
+
+  /* Header */
+  .hdr{padding:10px 14px 8px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0}
+  .hdr-row{display:flex;align-items:center;gap:9px}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pulse 2.4s ease-in-out infinite;flex-shrink:0}
+  .hdr-title{font-family:var(--fd);font-size:19px;font-weight:600;letter-spacing:-.3px}
+  .hdr-title em{color:var(--accent);font-style:normal}
+  .hdr-sub{font-family:var(--fm);font-size:9px;color:var(--text-muted);margin-top:1px;letter-spacing:.4px}
+  .mbadge{font-family:var(--fm);font-size:9px;color:var(--green);background:rgba(104,168,122,.1);border:1px solid rgba(104,168,122,.25);border-radius:10px;padding:2px 7px;white-space:nowrap}
+
+  /* Nav — bottom bar on mobile */
+  .nav{display:flex;gap:0;padding:0;background:var(--surface);border-top:1px solid var(--border);border-bottom:none;flex-shrink:0;overflow-x:auto;scrollbar-width:none;position:sticky;bottom:0;z-index:50;order:99}
+  .nav::-webkit-scrollbar{display:none}
+  .nb{padding:10px 12px;border-radius:0;border:none;border-top:2px solid transparent;background:transparent;color:var(--text-muted);font-family:var(--fm);font-size:10px;cursor:pointer;white-space:nowrap;transition:all .15s;flex:1;text-align:center;min-width:60px}
+  .nb:hover{color:var(--text-dim);background:var(--surface2)}
+  .nb.on{border-top-color:var(--accent);color:var(--accent);background:var(--accent-glow)}
+  .nb.grn.on{border-top-color:var(--green);color:var(--green);background:rgba(104,168,122,.08)}
+  .nb.blu.on{border-top-color:var(--blue);color:var(--blue);background:rgba(90,138,154,.08)}
+
+  /* Scroll area */
+  .scroll{flex:1;overflow-y:auto;padding:14px 14px 20px;display:flex;flex-direction:column;gap:12px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;-webkit-overflow-scrolling:touch}
+  .scroll::-webkit-scrollbar{width:3px}
+  .scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+
+  /* Chat bubbles — larger on mobile */
+  .msg{display:flex;flex-direction:column;gap:3px;animation:fadeUp .2s ease}
+  .msg.u{align-items:flex-end}
+  .msg.a{align-items:flex-start}
+  .mlabel{font-size:10px;color:var(--text-muted);font-family:var(--fm);padding:0 4px;letter-spacing:.3px}
+  .bubble{max-width:92%;padding:12px 15px;line-height:1.65;white-space:pre-wrap;font-size:15px}
+  .msg.u .bubble{background:#fff0e8;border:1px solid #e0b090;border-radius:18px 18px 4px 18px;color:var(--text);font-family:var(--fb)}
+  .msg.a .bubble{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:4px 18px 18px 18px;color:var(--text);font-family:var(--fm);font-size:13.5px}
+  .msg.a .bubble strong{color:var(--accent);font-weight:600}
+  .typing{display:flex;align-items:center;gap:6px;padding:14px 16px;background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:4px 18px 18px 18px;width:fit-content}
+  .tdot{width:6px;height:6px;border-radius:50%;background:var(--accent);animation:bounce 1.1s ease-in-out infinite}
+  .tdot:nth-child(2){animation-delay:.18s}
+  .tdot:nth-child(3){animation-delay:.36s}
+  @keyframes bounce{0%,100%{transform:translateY(0);opacity:.35}50%{transform:translateY(-5px);opacity:1}}
+  .mem-toast{align-self:center;font-family:var(--fm);font-size:11px;color:var(--green);padding:5px 13px;background:rgba(104,168,122,.08);border:1px solid rgba(104,168,122,.2);border-radius:20px;animation:fadeUp .3s ease}
+  .orch-toast{align-self:center;font-family:var(--fm);font-size:11px;color:var(--blue);padding:5px 13px;background:rgba(90,138,154,.08);border:1px solid rgba(90,138,154,.2);border-radius:20px;animation:fadeUp .3s ease}
+
+  /* Welcome */
+  .welcome{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:16px;padding:24px;text-align:center}
+  .wglyph{font-family:var(--fd);font-size:48px;color:var(--accent);opacity:.8;line-height:1}
+  .wline{font-family:var(--fd);font-size:17px;font-style:italic;color:var(--text-dim);max-width:290px;line-height:1.6}
+  .starters{display:flex;flex-direction:column;gap:8px;width:100%;max-width:380px}
+  .starter{padding:13px 16px;border:1px solid var(--border);border-radius:12px;background:var(--surface);color:var(--text-dim);font-family:var(--fb);font-size:14px;line-height:1.45;cursor:pointer;text-align:left;transition:all .15s;-webkit-tap-highlight-color:transparent}
+  .starter:hover{border-color:var(--accent-dim);color:var(--text);background:var(--surface2)}
+
+  /* Input area — larger for thumbs */
+  .input-area{padding:10px 14px 12px;background:var(--surface);border-top:1px solid var(--border);flex-shrink:0}
+  .input-row{display:flex;gap:9px;align-items:flex-end}
+  .ta{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:11px 14px;color:var(--text);font-family:var(--fb);font-size:15px;resize:vertical;min-height:44px;max-height:60vh;outline:none;line-height:1.5;transition:border-color .15s;-webkit-appearance:none}
+  .ta:focus{border-color:var(--accent-dim)}
+  .ta::placeholder{color:var(--text-muted)}
+  .send{width:44px;height:44px;border-radius:12px;background:var(--accent);border:none;color:#fff;font-size:20px;cursor:pointer;flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:all .15s;-webkit-tap-highlight-color:transparent}
+  .send:hover:not(:disabled){background:#f08440}
+  .send:disabled{opacity:.35;cursor:not-allowed}
+  .irow2{display:flex;align-items:center;margin-top:6px;gap:4px;overflow-x:auto;scrollbar-width:none}
+  .irow2::-webkit-scrollbar{display:none}
+  .mode-sel{background:none;border:1px solid var(--border);color:var(--text-muted);font-family:var(--fm);font-size:10px;cursor:pointer;padding:5px 10px;border-radius:15px;transition:all .15s;white-space:nowrap;flex-shrink:0}
+  .mode-sel.active{color:var(--accent);background:var(--accent-glow);border-color:var(--accent-dim)}
+  .clr-btn{background:none;border:none;color:var(--text-muted);font-family:var(--fm);font-size:10px;cursor:pointer;margin-left:auto;transition:color .15s;padding:5px;flex-shrink:0}
+  .clr-btn:hover{color:var(--accent)}
+
+  /* Cards — more padding for touch */
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;transition:all .15s}
+  .card.click{cursor:pointer;-webkit-tap-highlight-color:transparent}
+  .card.click:hover{border-color:var(--accent-dim);background:var(--surface2)}
+  .card-name{font-weight:600;font-size:15px}
+  .card-meta{font-family:var(--fm);font-size:11px;color:var(--text-dim);margin-top:2px}
+  .card-action{font-size:13px;color:var(--text-dim);margin-top:7px;line-height:1.5}
+  .tag{font-family:var(--fm);font-size:10px;padding:3px 8px;border-radius:8px;border:1px solid;letter-spacing:.3px;display:inline-block}
+
+  /* Detail */
+  .detail{display:flex;flex-direction:column;gap:12px}
+  .back{background:none;border:none;color:var(--text-muted);font-family:var(--fm);font-size:11px;cursor:pointer;padding:0;display:flex;align-items:center;gap:5px;transition:color .15s;margin-bottom:2px}
+  .back:hover{color:var(--accent)}
+  .dcard{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px}
+  .dname{font-family:var(--fd);font-size:21px;font-weight:600;letter-spacing:-.3px}
+  .drole{font-family:var(--fm);font-size:10px;color:var(--text-dim);letter-spacing:.3px;margin-top:2px}
+  .fl{font-family:var(--fm);font-size:9px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:3px}
+  .fv{font-size:13px;color:var(--text-dim);line-height:1.6;white-space:pre-wrap}
+  .fg{margin-bottom:11px}
+
+  /* Log interaction */
+  .logpanel{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:9px}
+  .ltabs{display:flex;gap:5px}
+  .ltab{padding:3px 11px;border-radius:15px;border:1px solid var(--border);background:transparent;color:var(--text-muted);font-family:var(--fm);font-size:10px;cursor:pointer;transition:all .15s}
+  .ltab.on{border-color:var(--accent-dim);color:var(--accent);background:var(--accent-glow)}
+  .lta{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:9px 11px;color:var(--text);font-family:var(--fb);font-size:12.5px;resize:vertical;min-height:70px;outline:none;line-height:1.5;width:100%;transition:border-color .15s}
+  .lta:focus{border-color:var(--accent-dim)}
+  .lta::placeholder{color:var(--text-muted)}
+  .lbtn{padding:7px 15px;border-radius:8px;background:var(--accent-glow);border:1px solid var(--accent-dim);color:var(--accent);font-family:var(--fm);font-size:11px;cursor:pointer;transition:all .15s}
+  .lbtn:hover:not(:disabled){background:rgba(224,112,48,.2)}
+  .lbtn:disabled{opacity:.35;cursor:not-allowed}
+  .lstatus{font-family:var(--fm);font-size:10px;color:var(--green)}
+
+  /* Interaction history */
+  .ientry{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:6px}
+  .imeta{display:flex;align-items:center;gap:7px;margin-bottom:5px;flex-wrap:wrap}
+  .itype{font-family:var(--fm);font-size:9px;padding:1px 6px;border-radius:6px;border:1px solid var(--border);color:var(--text-muted)}
+  .idate{font-family:var(--fm);font-size:9px;color:var(--text-muted)}
+  .isum{font-size:12.5px;color:var(--text-dim);line-height:1.6}
+  .iins{font-size:12px;color:var(--text-muted);margin-top:4px;padding-left:8px;border-left:2px solid var(--border)}
+  .inext{font-size:11px;font-family:var(--fm);color:var(--accent);margin-top:5px}
+
+  /* Memory panel */
+  .mentry{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--green);border-radius:3px 10px 10px 3px;padding:10px 32px 10px 13px;position:relative;margin-bottom:6px}
+  .mmeta{font-family:var(--fm);font-size:9px;color:var(--text-muted);letter-spacing:.4px;margin-bottom:4px}
+  .mtext{font-size:13px;color:var(--text-dim);line-height:1.6}
+  .mdel{position:absolute;top:7px;right:9px;background:none;border:none;color:var(--text-muted);font-size:16px;cursor:pointer;transition:color .15s;padding:0;line-height:1}
+  .mdel:hover{color:var(--red)}
+  .minput{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:7px 11px;color:var(--text);font-family:var(--fb);font-size:13px;outline:none;transition:border-color .15s}
+  .minput:focus{border-color:var(--green)}
+  .minput::placeholder{color:var(--text-muted)}
+  .mabtn{padding:7px 13px;border-radius:8px;background:rgba(104,168,122,.15);border:1px solid rgba(104,168,122,.3);color:var(--green);font-family:var(--fm);font-size:11px;cursor:pointer;transition:all .15s;white-space:nowrap}
+  .mabtn:hover:not(:disabled){background:rgba(104,168,122,.25)}
+  .mabtn:disabled{opacity:.35;cursor:not-allowed}
+
+  /* Import */
+  .import-box{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:9px;margin-top:6px}
+  .ita{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:9px 11px;color:var(--text);font-family:var(--fb);font-size:12.5px;resize:vertical;min-height:90px;outline:none;line-height:1.55;width:100%;transition:border-color .15s}
+  .ita:focus{border-color:var(--accent-dim)}
+  .ita::placeholder{color:var(--text-muted)}
+
+  /* Orch panel */
+  .orchpanel{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:10px}
+  .srcbtn{padding:4px 11px;border-radius:15px;border:1px solid var(--border);background:transparent;color:var(--text-muted);font-family:var(--fm);font-size:10px;cursor:pointer;transition:all .15s}
+  .srcbtn.on{border-color:var(--blue);color:var(--blue);background:rgba(90,138,154,.1)}
+  .obtn{padding:9px 18px;border-radius:9px;background:rgba(90,138,154,.15);border:1px solid var(--blue);color:var(--blue);font-family:var(--fm);font-size:11px;cursor:pointer;transition:all .15s;align-self:flex-start}
+  .obtn:hover:not(:disabled){background:rgba(90,138,154,.25)}
+  .obtn:disabled{opacity:.35;cursor:not-allowed}
+  .agrow{display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:7px}
+  .agdot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+  .aglabel{font-family:var(--fm);font-size:10px;letter-spacing:.3px}
+  .agmodel{font-family:var(--fm);font-size:9px;color:var(--text-muted);margin-left:auto}
+  .ritem{background:var(--surface2);border:1px solid var(--border);border-radius:7px;padding:9px 12px;font-size:12.5px;color:var(--text-dim);line-height:1.55;margin-bottom:5px}
+  .ritem strong{color:var(--text);font-weight:600}
+  .rnext{color:var(--accent);font-family:var(--fm);font-size:10px;margin-top:4px}
+
+  /* Log */
+  .lentry{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:11px 13px;margin-bottom:6px}
+  .lmeta{display:flex;align-items:center;gap:7px;margin-bottom:4px;flex-wrap:wrap}
+  .ltime{font-family:var(--fm);font-size:9px;color:var(--text-muted)}
+  .ltype{font-family:var(--fm);font-size:9px;padding:1px 6px;border-radius:6px;border:1px solid var(--border);color:var(--text-muted)}
+  .lsum{font-size:13px;color:var(--text-dim);line-height:1.5}
+
+  .empty{text-align:center;padding:40px;font-family:var(--fd);font-style:italic;font-size:16px;color:var(--text-muted)}
+  .section-title{font-family:var(--fd);font-size:16px;font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+  .section-title span{font-family:var(--fm);font-size:9px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px}
+
+  /* Edit forms */
+  .edit-form{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:10px}
+  .ef-row{display:flex;gap:8px;flex-wrap:wrap}
+  .ef-field{display:flex;flex-direction:column;gap:4px;flex:1;min-width:120px}
+  .ef-label{font-family:var(--fm);font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.8px}
+  .ef-input{background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:10px 12px;color:var(--text);font-family:var(--fb);font-size:15px;outline:none;transition:border-color .15s;width:100%;-webkit-appearance:none}
+  .ef-input:focus{border-color:var(--accent-dim)}
+  .ef-input::placeholder{color:var(--text-muted)}
+  .ef-select{background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:10px 12px;color:var(--text-dim);font-family:var(--fm);font-size:13px;outline:none;cursor:pointer;width:100%;-webkit-appearance:none}
+  .ef-textarea{background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:10px 12px;color:var(--text);font-family:var(--fb);font-size:15px;resize:vertical;min-height:65px;outline:none;line-height:1.5;width:100%;transition:border-color .15s;-webkit-appearance:none}
+  .ef-textarea:focus{border-color:var(--accent-dim)}
+  .ef-textarea::placeholder{color:var(--text-muted)}
+  .ef-actions{display:flex;gap:8px;margin-top:2px}
+  .save-btn{padding:11px 20px;border-radius:10px;background:var(--accent);border:none;color:#fff;font-family:var(--fm);font-size:13px;cursor:pointer;transition:all .15s;-webkit-tap-highlight-color:transparent}
+  .save-btn:hover{background:#f08440}
+  .cancel-btn{padding:11px 16px;border-radius:10px;background:none;border:1px solid var(--border);color:var(--text-dim);font-family:var(--fm);font-size:13px;cursor:pointer;transition:all .15s}
+  .cancel-btn:hover{border-color:var(--accent-dim);color:var(--text)}
+  .edit-btn{background:none;border:1px solid var(--border);border-radius:8px;color:var(--text-muted);font-family:var(--fm);font-size:11px;padding:5px 12px;cursor:pointer;transition:all .15s;-webkit-tap-highlight-color:transparent}
+  .edit-btn:hover{border-color:var(--accent-dim);color:var(--accent)}
+
+  /* New contact suggestion toast */
+  .nc-suggest{background:var(--surface2);border:1px solid var(--gold);border-radius:10px;padding:11px 13px;display:flex;align-items:center;gap:10px;animation:fadeUp .25s ease;flex-wrap:wrap}
+  .nc-text{font-size:12.5px;color:var(--text-dim);flex:1}
+  .nc-yes{padding:5px 13px;border-radius:7px;background:rgba(200,144,58,.15);border:1px solid var(--gold);color:var(--gold);font-family:var(--fm);font-size:10px;cursor:pointer;transition:all .15s}
+  .nc-yes:hover{background:rgba(200,144,58,.25)}
+  .nc-no{padding:5px 10px;border-radius:7px;background:none;border:1px solid var(--border);color:var(--text-muted);font-family:var(--fm);font-size:10px;cursor:pointer;transition:all .15s}
+  .nc-no:hover{color:var(--text-dim)}
+
+  /* Projects */
+  .proj-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 14px}
+  .proj-status{font-family:var(--fm);font-size:9px;padding:2px 7px;border-radius:8px;border:1px solid;letter-spacing:.3px;display:inline-block}
+  .proj-name{font-weight:600;font-size:13.5px;margin:5px 0 3px}
+  .proj-next{font-size:12px;color:var(--text-dim);line-height:1.5}
+  .proj-notes{font-size:11.5px;color:var(--text-muted);margin-top:3px;font-style:italic}
+
+  /* Kanban */
+  .kanban-wrap{flex:1;overflow-x:auto;overflow-y:hidden;padding:14px 14px 20px;display:flex;gap:12px;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+  .kanban-wrap::-webkit-scrollbar{height:4px}
+  .kanban-wrap::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+  .kanban-col{flex-shrink:0;width:240px;display:flex;flex-direction:column;gap:8px}
+  .kanban-col-hdr{padding:8px 12px;border-radius:9px;display:flex;align-items:center;justify-content:space-between;margin-bottom:2px}
+  .kanban-col-title{font-family:var(--fm);font-size:11px;font-weight:600;letter-spacing:.5px;text-transform:uppercase}
+  .kanban-col-count{font-family:var(--fm);font-size:10px;opacity:.6}
+  .kanban-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:11px 13px;transition:all .15s;box-shadow:0 1px 3px rgba(0,0,0,.06);position:relative}
+  .kanban-card:hover{border-color:var(--accent);box-shadow:0 2px 8px rgba(0,0,0,.1)}
+  .kanban-card.done-card{opacity:.5}
+  .kc-theme{font-family:var(--fm);font-size:9px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:5px}
+  .kc-title{font-size:13.5px;font-weight:600;color:var(--text);line-height:1.35;margin-bottom:4px}
+  .kc-link{font-family:var(--fm);font-size:10px;color:var(--blue);margin-bottom:3px;cursor:pointer}
+  .kc-link:hover{text-decoration:underline}
+  .kc-notes{font-size:11.5px;color:var(--text-muted);line-height:1.5;margin-top:3px;font-style:italic}
+  .kc-prio{position:absolute;top:10px;right:10px;width:7px;height:7px;border-radius:50%;flex-shrink:0}
+  .kc-actions{display:flex;gap:5px;margin-top:8px;flex-wrap:wrap}
+  .kc-btn{padding:3px 9px;border-radius:6px;border:1px solid var(--border);background:transparent;font-family:var(--fm);font-size:10px;cursor:pointer;transition:all .15s;color:var(--text-muted)}
+  .kc-btn:hover{border-color:var(--accent);color:var(--accent)}
+  .kc-btn.primary{border-color:var(--accent);color:var(--accent);background:var(--accent-glow)}
+  .kanban-add{padding:9px 12px;border:1px dashed var(--border);border-radius:10px;background:transparent;color:var(--text-muted);font-family:var(--fm);font-size:11px;cursor:pointer;transition:all .15s;text-align:left;width:100%}
+  .kanban-add:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-glow)}
+  .kanban-add-form{background:var(--surface);border:1px solid var(--accent);border-radius:10px;padding:11px 13px;display:flex;flex-direction:column;gap:8px}
+  .ka-input{background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:7px 10px;color:var(--text);font-family:var(--fb);font-size:13px;outline:none;width:100%;transition:border-color .15s}
+  .ka-input:focus{border-color:var(--accent)}
+  .ka-input::placeholder{color:var(--text-muted)}
+  .ka-select{background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:7px 10px;color:var(--text-dim);font-family:var(--fm);font-size:11px;outline:none;width:100%}
+  .ka-row{display:flex;gap:6px}
+`;
+
+function KanbanTab({kanban, setKanban, contacts, opps, setPreviousTab, setDetail, setEditing}) {
+  const [addingTo, setAddingTo] = useState(null);
+  const [newCard, setNewCard] = useState({title:'',theme:'pipeline',priority:'medium',notes:'',contactId:'',oppId:''});
+
+  const saveKanban = async (kb) => { setKanban(kb); await sSet(SK.kanban, kb); };
+  const moveCard = async (id, toCol) => {
+    const updated = kanban.map(c => c.id===id ? {...c, col:toCol, doneAt: toCol==='done' ? new Date().toISOString() : c.doneAt} : c);
+    await saveKanban(updated);
+  };
+  const deleteCard = async (id) => { await saveKanban(kanban.filter(c=>c.id!==id)); };
+
+  const themeColor = {pipeline:'#c85a18',marketing:'#155878',project:'#1e6e30',personal:'#8a5e08'};
+  const prioColor = {critical:'#c85a18',high:'#c8903a',medium:'#1e6e30',low:'#8a7a6a'};
+
+  const doAdd = async () => {
+    if (!newCard.title.trim()) return;
+    const card = {...newCard, id:'k'+Date.now(), col:addingTo, createdAt:new Date().toISOString()};
+    await saveKanban([...kanban, card]);
+    setNewCard({title:'',theme:'pipeline',priority:'medium',notes:'',contactId:'',oppId:''});
+    setAddingTo(null);
+  };
+
+  const activeDone = kanban.filter(c=>c.col==='done'&&(!c.doneAt||Date.now()-new Date(c.doneAt)<7*86400000));
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',height:'100%',overflow:'hidden'}}>
+      <div style={{padding:'10px 16px 6px',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+        <div className="section-title" style={{marginBottom:0}}>Actions <span>{kanban.filter(c=>c.col!=='done').length} open</span></div>
+        <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--text-muted)'}}>scroll →</div>
+      </div>
+      <div className="kanban-wrap">
+        {KANBAN_COLS.map(col=>{
+          const colCards = col==='done' ? activeDone : kanban.filter(c=>c.col===col);
+          const colColor = KANBAN_COL_COLORS[col];
+          return (
+            <div key={col} className="kanban-col">
+              <div className="kanban-col-hdr" style={{background:colColor+'18',border:`1px solid ${colColor}44`}}>
+                <span className="kanban-col-title" style={{color:colColor}}>{KANBAN_COL_LABELS[col]}</span>
+                <span className="kanban-col-count" style={{color:colColor}}>{colCards.length}</span>
+              </div>
+
+              {colCards.map(card=>{
+                const linkedContact = card.contactId ? contacts.find(c=>c.id===card.contactId) : null;
+                const linkedOpp = card.oppId ? opps.find(o=>o.id===card.oppId) : null;
+                const colIdx = KANBAN_COLS.indexOf(col);
+                const prevCol = colIdx > 0 ? KANBAN_COLS[colIdx-1] : null;
+                const nextCol = colIdx < KANBAN_COLS.length-1 ? KANBAN_COLS[colIdx+1] : null;
+                return (
+                  <div key={card.id} className={`kanban-card ${col==='done'?'done-card':''}`}>
+                    <div className="kc-prio" style={{background:prioColor[card.priority]||'var(--text-muted)'}}/>
+                    <div className="kc-theme" style={{color:themeColor[card.theme]||'var(--text-muted)'}}>{card.theme}</div>
+                    <div className="kc-title">{card.title}</div>
+                    {linkedContact&&<div className="kc-link" onClick={()=>{setPreviousTab('kanban');setDetail({type:'contact',item:linkedContact});setEditing(false);}}>👤 {linkedContact.name}</div>}
+                    {linkedOpp&&<div className="kc-link" onClick={()=>{setPreviousTab('kanban');setDetail({type:'opp',item:linkedOpp});setEditing(false);}}>💼 {linkedOpp.name}</div>}
+                    {card.notes&&<div className="kc-notes">{card.notes}</div>}
+                    <div className="kc-actions">
+                      {nextCol&&<button className="kc-btn primary" onClick={()=>moveCard(card.id,nextCol)}>→ {KANBAN_COL_LABELS[nextCol]}</button>}
+                      {prevCol&&<button className="kc-btn" onClick={()=>moveCard(card.id,prevCol)}>← Back</button>}
+                      <button className="kc-btn" onClick={()=>deleteCard(card.id)} style={{marginLeft:'auto',color:'var(--red)',borderColor:'transparent'}}>✕</button>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {addingTo===col ? (
+                <div className="kanban-add-form">
+                  <input className="ka-input" placeholder="What needs to happen?" autoFocus
+                    value={newCard.title} onChange={e=>setNewCard({...newCard,title:e.target.value})}
+                    onKeyDown={e=>e.key==='Enter'&&doAdd()}/>
+                  <div className="ka-row">
+                    <select className="ka-select" value={newCard.theme} onChange={e=>setNewCard({...newCard,theme:e.target.value})}>
+                      <option value="pipeline">Pipeline</option>
+                      <option value="marketing">Marketing</option>
+                      <option value="project">Project</option>
+                      <option value="personal">Personal</option>
+                    </select>
+                    <select className="ka-select" value={newCard.priority} onChange={e=>setNewCard({...newCard,priority:e.target.value})}>
+                      <option value="critical">Critical</option>
+                      <option value="high">High</option>
+                      <option value="medium">Medium</option>
+                      <option value="low">Low</option>
+                    </select>
+                  </div>
+                  <select className="ka-select" value={newCard.contactId} onChange={e=>setNewCard({...newCard,contactId:e.target.value})}>
+                    <option value="">No contact</option>
+                    {contacts.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                  <select className="ka-select" value={newCard.oppId} onChange={e=>setNewCard({...newCard,oppId:e.target.value})}>
+                    <option value="">No opportunity</option>
+                    {opps.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}
+                  </select>
+                  <input className="ka-input" placeholder="Notes (optional)"
+                    value={newCard.notes} onChange={e=>setNewCard({...newCard,notes:e.target.value})}/>
+                  <div className="ka-row">
+                    <button className="save-btn" style={{flex:1,padding:'7px'}} onClick={doAdd}>+ Add</button>
+                    <button className="cancel-btn" style={{padding:'7px 12px'}} onClick={()=>setAddingTo(null)}>✕</button>
+                  </div>
+                </div>
+              ) : (
+                col !== 'done' && <button className="kanban-add" onClick={()=>setAddingTo(col)}>+ Add action</button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+function AddProjectInput({onAdd}) {
+  const [val, setVal] = useState('');
+  return (
+    <div style={{display:'flex',gap:'7px',marginTop:'4px'}}>
+      <input className="minput" value={val} onChange={e=>setVal(e.target.value)}
+        onKeyDown={e=>{if(e.key==='Enter'&&val.trim()){onAdd(val);setVal('');}}}
+        placeholder="Add new project..."/>
+      <button className="mabtn" onClick={()=>{if(val.trim()){onAdd(val);setVal('');}}} disabled={!val.trim()}>+ Add</button>
+    </div>
+  );
+}
+function SAFWAISidekick() {
+  const [tab, setTab]           = useState('coach');
+  const [coachMode, setCoachMode] = useState('coach');
+  const [messages, setMessages] = useState([]);
+  const [input, setInput]       = useState('');
+  const [loading, setLoading]   = useState(false);
+  const [memories, setMemories] = useState([]);
+  const [contacts, setContacts] = useState([]);
+  const [opps, setOpps]         = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [interactions, setInteractions] = useState([]);
+  const [kanban, setKanban] = useState([]);
+  const [orchLog, setOrchLog]   = useState([]);
+  const [loaded, setLoaded]     = useState(false);
+  const [memToast, setMemToast] = useState(false);
+  const [orchToast, setOrchToast] = useState('');
+  const [detail, setDetail]     = useState(null);
+  const [previousTab, setPreviousTab] = useState('followup');
+  const [editing, setEditing]   = useState(false);
+  const [editData, setEditData] = useState({});
+  const [newContactSuggestion, setNewContactSuggestion] = useState(null); // {names:[]}
+  const [newOppSuggestion, setNewOppSuggestion] = useState(null); // {name:''}
+  const [showAddContact, setShowAddContact] = useState(false);
+  const [newContactData, setNewContactData] = useState({name:'',company:'',role:'',geography:'',priority:'medium',relationship:'',nextAction:'',notes:''});
+  const [showAddOpp, setShowAddOpp] = useState(false);
+  const [newOppData, setNewOppData] = useState({name:'',proposition:'',geography:'',stage:'1 - Prospect',probability:10,cltv:0,expectedValue:0,whereIsBall:'Ball in our court',nextAction:'',notes:''});
+  const [logMode, setLogMode]   = useState('manual');
+  const [logType, setLogType]   = useState('call');
+  const [logText, setLogText]   = useState('');
+  const [logLoading, setLogLoading] = useState(false);
+  const [logStatus, setLogStatus] = useState('');
+  const [newMem, setNewMem]     = useState('');
+  const [importText, setImportText] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [importRes, setImportRes] = useState(null);
+  const [orchInput, setOrchInput] = useState('');
+  const [orchSrc, setOrchSrc]   = useState('whatsapp');
+  const [orching, setOrching]   = useState(false);
+  const [orchAgents, setOrchAgents] = useState([]);
+  const [orchResult, setOrchResult] = useState(null);
+  const [savedChats, setSavedChats] = useState({coach:[],taskbreaker:[],braindump:[]});
+  const [pendingActivity, setPendingActivity] = useState(null); // {description, contactName, type}
+  const bottomRef = useRef(null);
+  const taRef     = useRef(null);
+
+  // Load all data on mount
+  useEffect(() => {
+    Promise.all([
+      sGet(SK.memory, []),
+      sGet(SK.contacts, SEED_C),
+      sGet(SK.opps, SEED_O),
+      sGet(SK.log, []),
+      sGet(SK.projects, SEED_PROJECTS),
+      sGet(SK.interactions, []),
+      sGet(SK.chats, {coach:[], taskbreaker:[], braindump:[]}),
+      sGet(SK.kanban, SEED_KANBAN)
+    ]).then(([m,c,o,l,p,ix,ch,kb]) => {
+      setMemories(Array.isArray(m)?m:[]);
+      setContacts(Array.isArray(c)?c:SEED_C);
+      setOpps(Array.isArray(o)?o:SEED_O);
+      setOrchLog(Array.isArray(l)?l:[]);
+      setProjects(Array.isArray(p)?p:SEED_PROJECTS);
+      setInteractions(Array.isArray(ix)?ix:[]);
+      const savedChats = ch && typeof ch === 'object' ? ch : {coach:[],taskbreaker:[],braindump:[]};
+      setSavedChats(savedChats);
+      setMessages(Array.isArray(savedChats.coach) ? savedChats.coach : []);
+      setKanban(Array.isArray(kb)?kb:SEED_KANBAN);
+      setLoaded(true);
+    });
+  }, []);
+
+  useEffect(() => { bottomRef.current?.scrollIntoView({behavior:'smooth'}); }, [messages, loading, memToast, orchToast]);
+
+  const resize = () => {
+    if (!taRef.current) return;
+    taRef.current.style.height = 'auto';
+    taRef.current.style.height = Math.min(taRef.current.scrollHeight, window.innerHeight * 0.6) + 'px';
+  };
+
+  // ── SAVE chat history to storage
+  const saveChat = async (mode, msgs) => {
+    const updated = {...savedChats, [mode]: msgs.slice(-50)}; // keep last 50 messages per mode
+    setSavedChats(updated);
+    await sSet(SK.chats, updated);
+  };
+
+  // ── QUICK LOG ACTIVITY from coach conversation
+  const quickLogActivity = async (description, contactName, type='note') => {
+    const contactIdx = contacts.findIndex(c =>
+      contactName && (c.name.toLowerCase().includes(contactName.toLowerCase().split(' ')[0]) ||
+      contactName.toLowerCase().includes(c.name.toLowerCase().split(' ')[0]))
+    );
+    const contactId = contactIdx >= 0 ? contacts[contactIdx].id : null;
+    const ix = {
+      id: Date.now() + Math.random(),
+      type, date: new Date().toISOString(),
+      summary: description,
+      sentiment: 'neutral', keyInsights: [], nextAction: '',
+      contactIds: contactId ? [contactId] : [],
+      oppIds: [], source: 'manual-from-coach'
+    };
+    const updatedIx = [ix, ...interactions].slice(0, 5000);
+    setInteractions(updatedIx);
+    await sSet(SK.interactions, updatedIx);
+    if (contactIdx >= 0) {
+      const updatedContacts = contacts.map((c,i) => i !== contactIdx ? c : {
+        ...c,
+        lastContact: new Date().toISOString().split('T')[0],
+        interactionIds: [ix.id, ...(c.interactionIds||[])]
+      });
+      setContacts(updatedContacts);
+      await sSet(SK.contacts, updatedContacts);
+    }
+    setPendingActivity(null);
+    setOrchToast(`◉ Activity logged${contactName ? ': ' + contactName : ''}`);
+    setTimeout(() => setOrchToast(''), 3000);
+  };
+
+  // ── BACKGROUND ORCHESTRATION after each coach exchange
+  const backgroundOrch = async (userMsg, assistantMsg, currentMems, currentContacts, currentOpps) => {
+    try {
+      // 1. Memory extraction (Haiku)
+      const memRaw = await apiCall(M.fast, MEMORY_EXTRACTOR_P,
+        `Existing memories:\n${currentMems.slice(-10).map(m=>`- ${m.text}`).join('\n')||'None'}\n\nExchange:\nUser: ${userMsg}\nCoach: ${assistantMsg}`, 600);
+      const newMemTexts = parseJ(memRaw) || [];
+
+      // 2. CRM contact scan (Haiku) — AI extracts names, JS does matching
+      const crmRaw = await apiCall(M.fast, CRM_SCANNER_P,
+        `Exchange:\nUser: ${userMsg}\nCoach: ${assistantMsg}`, 1000);
+      const crmPlan = parseJ(crmRaw);
+
+      // Local JS matching — zero tokens, instant, scales to any size
+      const isKnownContact = (name) => currentContacts.some(c =>
+        c.name.toLowerCase().includes(name.toLowerCase().split(' ')[0]) ||
+        name.toLowerCase().includes(c.name.toLowerCase().split(' ')[0])
+      );
+      const isKnownOpp = (name) => opps.some(o =>
+        o.name.toLowerCase().includes(name.toLowerCase().split(' ')[0]) ||
+        name.toLowerCase().includes(o.name.toLowerCase().split(' ')[0])
+      );
+
+      // Filter to only truly unknown names/opps
+      const unknownNames = (crmPlan?.allNamesDetected||[]).filter(n => !isKnownContact(n));
+      const unknownOpps  = (crmPlan?.allOppsDetected||[]).filter(o => !isKnownOpp(o));
+
+      // Inject back for downstream use
+      if (crmPlan) {
+        crmPlan.unknownNames = unknownNames;
+        crmPlan.unknownOpportunities = unknownOpps;
+      }
+
+      let updatedMems = currentMems;
+      let updatedContacts = currentContacts;
+      let crmChanged = false;
+
+      // Save memories
+      if (newMemTexts.length > 0) {
+        const entries = newMemTexts
+          .map(item => typeof item === 'string' ? item.trim() : typeof item === 'object' && item !== null ? (item.text||JSON.stringify(item)) : String(item))
+          .filter(Boolean)
+          .map(text => ({ id: Date.now() + Math.random(), text, timestamp: new Date().toISOString(), agent: 'coach' }));
+        updatedMems = [...currentMems, ...entries];
+        setMemories(updatedMems);
+        await sSet(SK.memory, updatedMems);
+        setMemToast(true);
+        setTimeout(() => setMemToast(false), 3000);
+      }
+
+      // Update CRM contacts + log real-world activities
+      if (crmPlan?.hasUpdates) {
+        updatedContacts = [...currentContacts];
+        let updatedIx = [...interactions];
+        let updatedOpps = [...opps];
+        let updatedProjs = [...projects];
+        let toastParts = [];
+
+        // Contact updates
+        for (const cu of (crmPlan.contactUpdates||[])) {
+          const idx = updatedContacts.findIndex(c =>
+            c.name.toLowerCase().includes(cu.contactName.toLowerCase().split(' ')[0]) ||
+            cu.contactName.toLowerCase().includes(c.name.toLowerCase().split(' ')[0])
+          );
+          if (idx >= 0) {
+            updatedContacts[idx] = {
+              ...updatedContacts[idx],
+              lastContact: new Date().toISOString().split('T')[0],
+              nextAction: cu.nextAction || updatedContacts[idx].nextAction,
+            };
+            crmChanged = true;
+          }
+        }
+
+        // Real-world activities — log to global interactions store
+        for (const act of (crmPlan.realWorldActivities||[])) {
+          const contactIdx = updatedContacts.findIndex(c =>
+            c.name.toLowerCase().includes(act.contactName.toLowerCase().split(' ')[0]) ||
+            act.contactName.toLowerCase().includes(c.name.toLowerCase().split(' ')[0])
+          );
+          const contactId = contactIdx >= 0 ? updatedContacts[contactIdx].id : null;
+          const ix = {
+            id: Date.now() + Math.random(),
+            type: act.type || 'note',
+            date: new Date().toISOString(),
+            summary: act.summary,
+            sentiment: act.sentiment || 'neutral',
+            keyInsights: [],
+            nextAction: act.nextAction || '',
+            contactIds: contactId ? [contactId] : [],
+            oppIds: [],
+            source: 'auto-detected'
+          };
+          updatedIx = [ix, ...updatedIx].slice(0, 5000);
+          if (contactIdx >= 0) {
+            updatedContacts[contactIdx] = {
+              ...updatedContacts[contactIdx],
+              lastContact: new Date().toISOString().split('T')[0],
+              nextAction: act.nextAction || updatedContacts[contactIdx].nextAction,
+              interactionIds: [ix.id, ...(updatedContacts[contactIdx].interactionIds || [])]
+            };
+            crmChanged = true;
+          }
+          toastParts.push(`activity logged: ${act.contactName}`);
+        }
+
+        // If scanner detected activities but couldn't auto-log (no matching contact),
+        // surface a pre-filled confirmation card for the user
+        const unmatched = (crmPlan.realWorldActivities||[]).filter(act => {
+          return !updatedContacts.find(c =>
+            c.name.toLowerCase().includes(act.contactName.toLowerCase().split(' ')[0]) ||
+            act.contactName.toLowerCase().includes(c.name.toLowerCase().split(' ')[0])
+          );
+        });
+        if (unmatched.length > 0) {
+          const first = unmatched[0];
+          setPendingActivity({description: first.summary, contactName: first.contactName, type: first.type||'note'});
+        }
+
+        // Pipeline opportunity updates
+        for (const ou of (crmPlan.opportunityUpdates||[])) {
+          const idx = updatedOpps.findIndex(o =>
+            o.name.toLowerCase().includes(ou.oppName.toLowerCase().split(' ')[0]) ||
+            ou.oppName.toLowerCase().includes(o.name.toLowerCase().split(' ')[0])
+          );
+          if (idx >= 0) {
+            updatedOpps[idx] = {
+              ...updatedOpps[idx],
+              stage: ou.stageUpdate || updatedOpps[idx].stage,
+              nextAction: ou.nextAction || updatedOpps[idx].nextAction,
+              notes: ou.notes ? updatedOpps[idx].notes + '\n\n' + new Date().toLocaleDateString('en-GB') + ': ' + ou.notes : updatedOpps[idx].notes
+            };
+            toastParts.push(`pipeline: ${ou.oppName}`);
+          }
+        }
+
+        // Project updates
+        for (const pu of (crmPlan.projectUpdates||[])) {
+          const idx = updatedProjs.findIndex(p =>
+            p.name.toLowerCase().includes(pu.projectName.toLowerCase().split(' ')[0]) ||
+            pu.projectName.toLowerCase().includes(p.name.toLowerCase().split(' ')[0])
+          );
+          if (idx >= 0) {
+            updatedProjs[idx] = {
+              ...updatedProjs[idx],
+              status: pu.statusUpdate || updatedProjs[idx].status,
+              nextAction: pu.nextAction || updatedProjs[idx].nextAction,
+              notes: pu.notes ? updatedProjs[idx].notes + ' · ' + pu.notes : updatedProjs[idx].notes
+            };
+            toastParts.push(`project: ${pu.projectName}`);
+          }
+        }
+
+        // Save all updated state
+        if (crmChanged || toastParts.length > 0) {
+          setContacts(updatedContacts);
+          setInteractions(updatedIx);
+          setOpps(updatedOpps);
+          setProjects(updatedProjs);
+          await sSet(SK.contacts, updatedContacts);
+          await sSet(SK.interactions, updatedIx);
+          await sSet(SK.opps, updatedOpps);
+          await sSet(SK.projects, updatedProjs);
+          const toast = toastParts.length > 0 ? toastParts.join(' · ') : `contacts updated`;
+          setOrchToast(`◉ ${toast}`);
+          setTimeout(() => setOrchToast(''), 5000);
+        }
+      }
+
+      // Suggest adding unknown names as contacts
+      if (crmPlan?.unknownNames?.length > 0) {
+        setNewContactSuggestion({ names: crmPlan.unknownNames });
+      }
+
+      // Suggest adding unknown opportunities
+      if (crmPlan?.unknownOpportunities?.length > 0) {
+        setNewOppSuggestion({ name: crmPlan.unknownOpportunities[0] });
+      }
+
+      // Save extra memories from CRM scan
+      if (crmPlan?.memories?.length > 0) {
+        const extras = crmPlan.memories.map(text => ({
+          id: Date.now() + Math.random(),
+          text, timestamp: new Date().toISOString(), agent: 'crm-scan'
+        }));
+        const finalMems = [...updatedMems, ...extras];
+        setMemories(finalMems);
+        await sSet(SK.memory, finalMems);
+      }
+
+    } catch(e) { console.error('Background orch error:', e); }
+  };
+
+  // ── SEND — auto-routes to right agent via orchestrator
+  const send = async (text) => {
+    const msg = (text || input).trim();
+    if (!msg || loading) return;
+    const userMsg = {role:'user', content:msg};
+    const history = [...messages, userMsg];
+    setMessages(history);
+    setInput('');
+    if (taRef.current) taRef.current.style.height = 'auto';
+    setLoading(true);
+
+    try {
+      // 1. Route to correct agent (fast, Haiku)
+      let route = 'coach';
+      try {
+        const routeRaw = await apiCall(M.fast, ROUTER_P, msg, 10);
+        const r = routeRaw.trim().toLowerCase();
+        if (['coach','taskbreaker','braindump'].includes(r)) route = r;
+      } catch {}
+      setCoachMode(route);
+
+      // 2. Build prompt for routed agent
+      const prompt = buildCoachPrompt(memories, route);
+      const reply = await apiCall(M.main, prompt, history.map(m=>`${m.role==='user'?'User':'Coach'}: ${m.content}`).join('\n\n'), 1000);
+      const final = [...history, {role:'assistant', content:reply}];
+      setMessages(final);
+      saveChat('coach', final); // always save under 'coach' key — single conversation
+      // Background orchestration — non-blocking
+      backgroundOrch(msg, reply, memories, contacts, opps);
+    } catch(e) {
+      setMessages([...history, {role:'assistant', content:'Connection issue. Try again.'}]);
+    } finally { setLoading(false); }
+  };
+
+  const onKey = e => { if (e.key==='Enter'&&!e.shiftKey) { e.preventDefault(); send(); } };
+
+  // ── CENTRAL INTERACTION SAVER
+  // Stores interaction as a global entity, updates contact interactionIds reference
+  const saveInteraction = async (interaction, contactId, oppId = null, currentContacts, currentInteractions) => {
+    const ix = {
+      ...interaction,
+      contactIds: contactId ? [contactId] : [],
+      oppIds: oppId ? [oppId] : [],
+    };
+    const updatedIx = [ix, ...currentInteractions].slice(0, 5000);
+    setInteractions(updatedIx);
+    await sSet(SK.interactions, updatedIx);
+
+    // Update contact: add interactionId ref, update lastContact + nextAction
+    // Keep backward compat: don't embed full interaction, just reference
+    const updatedContacts = currentContacts.map(c => {
+      if (c.id !== contactId) return c;
+      return {
+        ...c,
+        lastContact: new Date().toISOString().split('T')[0],
+        nextAction: interaction.nextAction || c.nextAction,
+        interactionIds: [ix.id, ...(c.interactionIds || [])],
+        // Notes update if situation changed
+        notes: interaction.contactUpdate
+          ? c.notes + '\n\n' + new Date().toLocaleDateString('en-GB') + ': ' + interaction.contactUpdate
+          : c.notes
+      };
+    });
+    return { updatedContacts, updatedIx };
+  };
+
+  // ── LOG INTERACTION on contact detail
+  const logInteraction = async () => {
+    if (!logText.trim() || logLoading || !detail) return;
+    setLogLoading(true); setLogStatus('Processing...');
+    let extracted = null;
+
+    if (logMode === 'paste') {
+      try {
+        const raw = await apiCall(M.fast,
+          `Extract CRM update from content. Return ONLY JSON: {"summary":"2-3 sentences","sentiment":"positive|neutral|negative|mixed","keyInsights":["insight"],"nextAction":"action","contactUpdate":"situation update or null"}`,
+          `Contact: ${detail.item.name}\nContent:\n${logText}`, 600);
+        extracted = parseJ(raw);
+      } catch {}
+    }
+
+    const ix = {
+      id: Date.now() + Math.random(),
+      type: logType,
+      date: new Date().toISOString(),
+      mode: logMode,
+      summary: extracted?.summary || logText,
+      sentiment: extracted?.sentiment || 'neutral',
+      keyInsights: extracted?.keyInsights || [],
+      nextAction: extracted?.nextAction || '',
+      contactUpdate: extracted?.contactUpdate || null,
+      source: 'manual-log'
+    };
+
+    const { updatedContacts } = await saveInteraction(ix, detail.item.id, null, contacts, interactions);
+    setContacts(updatedContacts);
+    await sSet(SK.contacts, updatedContacts);
+    setDetail({...detail, item: updatedContacts.find(c => c.id === detail.item.id)});
+    setLogText(''); setLogStatus('◉ Logged.'); setTimeout(() => setLogStatus(''), 3000);
+    setLogLoading(false);
+  };
+
+  // ── FULL ORCHESTRATOR (Inbox tab)
+  const runOrch = async () => {
+    if (!orchInput.trim() || orching) return;
+    setOrching(true); setOrchResult(null);
+    const ags = [
+      {label:'ORCHESTRATOR',detail:'Reading + routing...',status:'running',model:'Sonnet 4.6'},
+      {label:'MEMORY AGENT',detail:'Waiting...',status:'waiting',model:'Haiku 4.5'},
+      {label:'CRM AGENT',detail:'Waiting...',status:'waiting',model:'Haiku 4.5'},
+    ];
+    setOrchAgents([...ags]);
+
+    try {
+      const recentMems = memories.slice(-10).map(m=>`- ${m.text}`).join('\n');
+
+      const planRaw = await apiCall(M.main, ORCHESTRATOR_P,
+        `Source: ${orchSrc}\nContent:\n${orchInput}\n\nRecent memories:\n${recentMems}`, 1500);
+      const plan = parseJ(planRaw);
+      if (!plan) throw new Error('Orchestrator returned invalid JSON.');
+
+      // Local JS matching — AI extracts names, JS checks against live data
+      const isKnownC = (name) => contacts.some(c =>
+        c.name.toLowerCase().includes(name.toLowerCase().split(' ')[0]) ||
+        name.toLowerCase().includes(c.name.toLowerCase().split(' ')[0])
+      );
+      const isKnownO = (name) => opps.some(o =>
+        o.name.toLowerCase().includes(name.toLowerCase().split(' ')[0]) ||
+        name.toLowerCase().includes(o.name.toLowerCase().split(' ')[0])
+      );
+      // Filter contact/opp updates to only ones that actually match live data
+      if (plan.contactUpdates) {
+        plan.contactUpdates = plan.contactUpdates.filter(cu => isKnownC(cu.contactName));
+      }
+      if (plan.opportunityUpdates) {
+        plan.opportunityUpdates = plan.opportunityUpdates.filter(ou => isKnownO(ou.oppName));
+      }
+
+      const upd0 = [...ags];
+      upd0[0] = {...upd0[0], status:'done', detail:`Routing to ${[plan.routeMemory&&'memory',plan.routeCRM&&'CRM'].filter(Boolean).join(' + ')||'nothing'}`};
+      setOrchAgents([...upd0]);
+
+      // Memory agent
+      let savedCount = 0;
+      let updMems = [...memories];
+      if (plan.routeMemory && plan.memories?.length) {
+        upd0[1] = {...upd0[1], status:'running', detail:`Saving ${plan.memories.length} insights...`};
+        setOrchAgents([...upd0]);
+        const entries = plan.memories.map(text=>({id:Date.now()+Math.random(),text,timestamp:new Date().toISOString(),agent:'orchestrator'}));
+        updMems = [...memories, ...entries];
+        setMemories(updMems);
+        await sSet(SK.memory, updMems);
+        savedCount = entries.length;
+      }
+      upd0[1] = {...upd0[1], status:'done', detail: savedCount ? `${savedCount} memories saved` : 'No new memories'};
+      setOrchAgents([...upd0]);
+
+      // CRM agent
+      let crmUpdates = [];
+      let updContacts = [...contacts];
+      let updOpps = [...opps];
+      let updIxs = [...interactions];
+      if (plan.routeCRM && plan.contactUpdates?.length) {
+        upd0[2] = {...upd0[2], status:'running', detail:`Updating ${plan.contactUpdates.length} contact(s)...`};
+        setOrchAgents([...upd0]);
+
+        for (const cu of plan.contactUpdates) {
+          const ix = {
+            id:Date.now()+Math.random(), type:orchSrc, date:new Date().toISOString(),
+            summary:cu.summary, sentiment:cu.sentiment||'neutral',
+            keyInsights:cu.keyInsights||[], nextAction:cu.nextAction||'',
+            contactUpdate:cu.situationUpdate||null,
+            contactIds:[], oppIds:[],
+            source:'orchestrator'
+          };
+          const idx = updContacts.findIndex(c=>
+            c.name.toLowerCase().includes(cu.contactName.toLowerCase().split(' ')[0])||
+            cu.contactName.toLowerCase().includes(c.name.toLowerCase().split(' ')[0])
+          );
+          if (idx>=0) {
+            ix.contactIds = [updContacts[idx].id];
+            updContacts[idx] = {
+              ...updContacts[idx],
+              lastContact:new Date().toISOString().split('T')[0],
+              nextAction:cu.nextAction||updContacts[idx].nextAction,
+              interactionIds:[ix.id,...(updContacts[idx].interactionIds||[])]
+            };
+            crmUpdates.push({name:cu.contactName,sentiment:cu.sentiment});
+          }
+          updIxs.push(ix);
+        }
+        for (const ou of (plan.opportunityUpdates||[])) {
+          const idx = updOpps.findIndex(o=>o.name.toLowerCase().includes(ou.oppName.toLowerCase().split(' ')[0]));
+          if (idx>=0) {
+            updOpps[idx] = {
+              ...updOpps[idx],
+              stage:ou.stageUpdate||updOpps[idx].stage,
+              nextAction:ou.nextAction||updOpps[idx].nextAction,
+              notes:ou.notes?updOpps[idx].notes+'\n\n'+new Date().toLocaleDateString()+': '+ou.notes:updOpps[idx].notes
+            };
+          }
+        }
+        setContacts(updContacts); setOpps(updOpps);
+        if (updIxs.length > interactions.length) {
+          const finalIxs = updIxs.slice(0, 5000);
+          setInteractions(finalIxs);
+          await sSet(SK.interactions, finalIxs);
+        }
+        await sSet(SK.contacts, updContacts);
+        await sSet(SK.opps, updOpps);
+      }
+      upd0[2] = {...upd0[2], status:'done', detail:crmUpdates.length?`${crmUpdates.length} update(s) written`:'No CRM updates'};
+      setOrchAgents([...upd0]);
+
+      const logEntry = {
+        id:Date.now(), timestamp:new Date().toISOString(), source:orchSrc,
+        summary:plan.summary, contactsInvolved:plan.contactsInvolved||[],
+        opportunitiesInvolved:plan.opportunitiesInvolved||[],
+        memoriesSaved:savedCount, crmUpdates, adhocInsight:plan.adhocInsight||null
+      };
+      const newLog = [logEntry,...orchLog].slice(0,50);
+      setOrchLog(newLog); await sSet(SK.log, newLog);
+      setOrchResult({plan, crmUpdates, savedCount});
+      setOrchInput('');
+    } catch(e) {
+      setOrchAgents(prev=>prev.map(a=>a.status==='running'?{...a,status:'error',detail:'Failed'}:a));
+    } finally { setOrching(false); }
+  };
+
+  // ── SAVE EDIT contact or opp
+  const saveEdit = async () => {
+    if (detail?.type === 'contact') {
+      const updated = contacts.map(c => c.id === detail.item.id ? {...c, ...editData} : c);
+      setContacts(updated); await sSet(SK.contacts, updated);
+      setDetail({...detail, item: {...detail.item, ...editData}});
+    } else if (detail?.type === 'opp') {
+      const updated = opps.map(o => o.id === detail.item.id ? {...o, ...editData} : o);
+      setOpps(updated); await sSet(SK.opps, updated);
+      setDetail({...detail, item: {...detail.item, ...editData}});
+    }
+    setEditing(false);
+  };
+
+  const startEdit = () => {
+    setEditData(detail.type === 'contact'
+      ? {name:detail.item.name,company:detail.item.company,role:detail.item.role,geography:detail.item.geography,priority:detail.item.priority,relationship:detail.item.relationship,nextAction:detail.item.nextAction,notes:detail.item.notes}
+      : {name:detail.item.name,stage:detail.item.stage,probability:detail.item.probability,expectedValue:detail.item.expectedValue,cltv:detail.item.cltv,whereIsBall:detail.item.whereIsBall,proposition:detail.item.proposition,nextAction:detail.item.nextAction,notes:detail.item.notes}
+    );
+    setEditing(true);
+  };
+
+  // ── ADD new contact
+  const addContact = async () => {
+    if (!newContactData.name.trim()) return;
+    const c = {...newContactData, id:'c'+Date.now(), lastContact:new Date().toISOString().split('T')[0], opportunityIds:[], interactions:[]};
+    const updated = [...contacts, c]; setContacts(updated); await sSet(SK.contacts, updated);
+    setShowAddContact(false); setNewContactData({name:'',company:'',role:'',geography:'',priority:'medium',relationship:'',nextAction:'',notes:''});
+  };
+
+  // ── ADD new opp
+  const addOpp = async () => {
+    if (!newOppData.name.trim()) return;
+    const o = {...newOppData, id:'o'+Date.now(), contactIds:[], interactions:[], cltv:Number(newOppData.cltv)||0, expectedValue:Number(newOppData.expectedValue)||0, probability:Number(newOppData.probability)||0};
+    const updated = [...opps, o]; setOpps(updated); await sSet(SK.opps, updated);
+    setShowAddOpp(false); setNewOppData({name:'',proposition:'',geography:'',stage:'1 - Prospect',probability:10,cltv:0,expectedValue:0,whereIsBall:'Ball in our court',nextAction:'',notes:''});
+  };
+
+  // ── UPDATE project
+  const updateProject = async (id, changes) => {
+    const updated = projects.map(p => p.id===id ? {...p,...changes} : p);
+    setProjects(updated); await sSet(SK.projects, updated);
+  };
+
+  const addProject = async (name) => {
+    if (!name.trim()) return;
+    const p = {id:'p'+Date.now(),name:name.trim(),status:'not_started',priority:'medium',notes:'',nextAction:''};
+    const updated = [...projects, p]; setProjects(updated); await sSet(SK.projects, updated);
+  };
+  const deleteMem = async id => {
+    const u = memories.filter(m=>m.id!==id);
+    setMemories(u); await sSet(SK.memory, u);
+  };
+  const addMem = async () => {
+    if (!newMem.trim()) return;
+    const e = {id:Date.now(),text:newMem.trim(),timestamp:new Date().toISOString(),agent:'manual'};
+    const u = [...memories, e]; setMemories(u); await sSet(SK.memory, u); setNewMem('');
+  };
+  const importSession = async () => {
+    if (!importText.trim()||importing) return;
+    setImporting(true); setImportRes(null);
+    const chunks = []; const cs = 1500;
+    for (let i=0;i<importText.length;i+=cs) chunks.push(importText.slice(i,i+cs));
+    const all = [];
+    try {
+      for (let i=0;i<chunks.length;i++) {
+        setImportRes({status:'progress',msg:`Processing ${i+1}/${chunks.length}...`});
+        const raw = await apiCall(M.fast,
+          `Extract memories from session content. Return ONLY JSON array of concise third-person strings (max 25 words each). Min 10 if rich content. No markdown.`,
+          `Part ${i+1}/${chunks.length}:\n${chunks[i]}`, 1000);
+        const ex = parseJ(raw)||[];
+        ex.forEach(item=>{
+          const text = typeof item === 'string' ? item.trim() : typeof item === 'object' && item !== null ? (item.text||item.content||JSON.stringify(item)) : String(item);
+          if (text) all.push({id:Date.now()+Math.random(),text,timestamp:new Date().toISOString(),agent:'session-import'});
+        });
+        if (i<chunks.length-1) await new Promise(r=>setTimeout(r,400));
+      }
+      if (all.length>0) {
+        const u=[...memories,...all]; setMemories(u); await sSet(SK.memory,u);
+        setImportRes({status:'ok',count:all.length}); setImportText('');
+      } else { setImportRes({status:'empty'}); }
+    } catch(e) { setImportRes({status:'error',msg:e.message}); }
+    finally { setImporting(false); }
+  };
+
+  // Follow-up list
+  const followups = [...contacts]
+    .filter(c=>c.nextAction&&!c.nextAction.toLowerCase().startsWith('nothing until')&&c.priority!=='low')
+    .sort((a,b)=>(prio[a.priority]??3)-(prio[b.priority]??3)||daysSince(b.lastContact)-daysSince(a.lastContact));
+
+  const agent = coachMode;
+  const agentLabel = coachMode==='taskbreaker'?'agent #2 · task breaker':coachMode==='braindump'?'agent #3 · brain dump':'agent #1 · personal coach';
+  const agentGlyph = '◎';
+  const agentTagline = 'Your thinking partner. Always in your corner.';
+  const agentStarters = coachMode==='taskbreaker'
+    ? ["A report I've needed to write for weeks — I can't start.","An email I keep opening then closing without replying.","A conversation I've been putting off."]
+    : coachMode==='braindump'
+    ? ["Just let me dump everything — don't judge me.","My head is full and I don't know what matters today.","I have 40 things, 3 deadlines, family stuff — I'm stuck."]
+    : ["What's on my mind right now? Let me tell you.","I can focus for hours on things I love but can't start what matters — why?","I have something important due and I can't seem to begin."];
+
+  if (!loaded) return (
+    <><style>{CSS}</style>
+    <div className="app" style={{alignItems:'center',justifyContent:'center'}}>
+      <div style={{fontFamily:'var(--fm)',color:'var(--text-muted)',fontSize:'12px'}}>Loading SAFWAI Sidekick...</div>
+    </div></>
+  );
+
+  // ── CONTACT DETAIL
+  if (detail?.type==='contact') {
+    const c = detail.item;
+    const cOpps = opps.filter(o=>o.contactIds?.includes(c.id));
+    return (
+      <><style>{CSS}</style>
+      <div className="app">
+        <div className="hdr">
+          <div className="hdr-row">
+            <div className="dot"/>
+            <div><div className="hdr-title">SAFWAI <em>Sidekick</em></div><div className="hdr-sub">contact detail</div></div>
+            <DohaClock/>
+          </div>
+        </div>
+        <div className="scroll">
+          <div className="detail fade">
+            <button className="back" onClick={()=>{setDetail(null);setEditing(false);setTab(previousTab);}}>← back</button>
+            <div className="dcard">
+              <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:'8px'}}>
+                <div>
+                  <div className="dname">{c.name}</div>
+                  <div className="drole">{c.role} · {c.company} · {c.geography}</div>
+                </div>
+                <button className="edit-btn" onClick={startEdit}>✎ Edit</button>
+              </div>
+              <div style={{display:'flex',gap:'6px',marginTop:'9px',flexWrap:'wrap'}}>
+                <span className="tag" style={{color:prioCol[c.priority],borderColor:prioCol[c.priority]+'44'}}>{c.priority}</span>
+                <span className="tag" style={{color:'var(--text-muted)',borderColor:'var(--border)'}}>last contact {daysSince(c.lastContact)}d ago</span>
+              </div>
+            </div>
+
+            {editing && (
+              <div className="edit-form fade">
+                <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--accent)',textTransform:'uppercase',letterSpacing:'1px'}}>Editing Contact</div>
+                <div className="ef-row">
+                  <div className="ef-field"><div className="ef-label">Name</div><input className="ef-input" value={editData.name||''} onChange={e=>setEditData({...editData,name:e.target.value})}/></div>
+                  <div className="ef-field"><div className="ef-label">Company</div><input className="ef-input" value={editData.company||''} onChange={e=>setEditData({...editData,company:e.target.value})}/></div>
+                </div>
+                <div className="ef-row">
+                  <div className="ef-field"><div className="ef-label">Role</div><input className="ef-input" value={editData.role||''} onChange={e=>setEditData({...editData,role:e.target.value})}/></div>
+                  <div className="ef-field"><div className="ef-label">Geography</div><input className="ef-input" value={editData.geography||''} onChange={e=>setEditData({...editData,geography:e.target.value})}/></div>
+                </div>
+                <div className="ef-field"><div className="ef-label">Priority</div>
+                  <select className="ef-select" value={editData.priority||'medium'} onChange={e=>setEditData({...editData,priority:e.target.value})}>
+                    <option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option>
+                  </select>
+                </div>
+                <div className="ef-field"><div className="ef-label">Relationship</div><textarea className="ef-textarea" value={editData.relationship||''} onChange={e=>setEditData({...editData,relationship:e.target.value})}/></div>
+                <div className="ef-field"><div className="ef-label">Next Action</div><input className="ef-input" value={editData.nextAction||''} onChange={e=>setEditData({...editData,nextAction:e.target.value})}/></div>
+                <div className="ef-field"><div className="ef-label">Notes</div><textarea className="ef-textarea" style={{minHeight:'80px'}} value={editData.notes||''} onChange={e=>setEditData({...editData,notes:e.target.value})}/></div>
+                <div className="ef-actions">
+                  <button className="save-btn" onClick={saveEdit}>Save</button>
+                  <button className="cancel-btn" onClick={()=>setEditing(false)}>Cancel</button>
+                </div>
+              </div>
+            )}
+            <div className="dcard">
+              <div className="fg"><div className="fl">Relationship</div><div className="fv">{c.relationship||'—'}</div></div>
+              <div className="fg"><div className="fl">Notes</div><div className="fv">{c.notes||'—'}</div></div>
+              <div style={{marginBottom:0}}><div className="fl">Next Action</div><div className="fv" style={{color:'var(--accent)'}}>{c.nextAction||'—'}</div></div>
+            </div>
+            {cOpps.length>0&&(
+              <div className="dcard">
+                <div className="fl" style={{marginBottom:'8px'}}>Linked Opportunities</div>
+                {cOpps.map(o=>(
+                  <div key={o.id} style={{padding:'8px 10px',background:'var(--surface2)',borderRadius:'7px',border:'1px solid var(--border)',cursor:'pointer',marginBottom:'5px'}}
+                    onClick={()=>{setPreviousTab(tab);setDetail({type:'opp',item:o});}}>
+                    <div style={{fontSize:'12.5px',fontWeight:600}}>{o.name}</div>
+                    <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--text-dim)',marginTop:'2px'}}>{o.stage} · {o.expectedValue>0?'$'+o.expectedValue.toLocaleString()+' exp':'TBD'}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="logpanel">
+              <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--accent)',textTransform:'uppercase',letterSpacing:'1px'}}>Log Interaction</div>
+              <div className="ltabs">
+                <button className={`ltab ${logMode==='manual'?'on':''}`} onClick={()=>setLogMode('manual')}>Manual note</button>
+                <button className={`ltab ${logMode==='paste'?'on':''}`} onClick={()=>setLogMode('paste')}>Paste → AI extract</button>
+              </div>
+              <div style={{display:'flex',gap:'6px'}}>
+                {['call','whatsapp','email','meeting','note'].map(t=>(
+                  <button key={t} className={`ltab ${logType===t?'on':''}`} onClick={()=>setLogType(t)}>{t}</button>
+                ))}
+              </div>
+              <textarea className="lta" value={logText} onChange={e=>setLogText(e.target.value)}
+                placeholder={logMode==='manual'?'Type notes from this interaction...':'Paste WhatsApp, email, or transcript — AI extracts the update...'}/>
+              <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
+                <button className="lbtn" onClick={logInteraction} disabled={!logText.trim()||logLoading}>
+                  {logLoading?'Processing...':logMode==='paste'?'→ Extract & Save':'→ Save'}
+                </button>
+                {logStatus&&<span className="lstatus">{logStatus}</span>}
+              </div>
+            </div>
+            {/* Interaction History — from global store + backward compat embedded */}
+            {(()=>{
+              const globalIxs = interactions.filter(ix => ix.contactIds?.includes(c.id));
+              const embeddedIxs = (c.interactions||[]).filter(ix => !globalIxs.find(g=>g.id===ix.id));
+              const allIxs = [...globalIxs, ...embeddedIxs].sort((a,b)=>new Date(b.date)-new Date(a.date));
+              if (allIxs.length===0) return null;
+              return (
+                <div>
+                  <div className="section-title" style={{fontSize:'14px',marginBottom:'8px'}}>Interaction History <span>{allIxs.length} logged</span></div>
+                  {allIxs.map(i=>(
+                    <div key={i.id} className="ientry">
+                      <div className="imeta">
+                        <span className="itype">{i.type}</span>
+                        <span className="idate">{new Date(i.date).toLocaleDateString('en-GB',{day:'numeric',month:'short',timeZone:'Asia/Qatar'})}</span>
+                        {i.sentiment&&<span style={{fontFamily:'var(--fm)',fontSize:'9px',color:sentCol[i.sentiment]||'var(--text-muted)',background:(sentCol[i.sentiment]||'#44403a')+'18',border:`1px solid ${sentCol[i.sentiment]||'#44403a'}44`,padding:'1px 6px',borderRadius:'6px'}}>{i.sentiment}</span>}
+                        {i.source&&<span style={{fontFamily:'var(--fm)',fontSize:'9px',color:'var(--text-muted)'}}>{i.source}</span>}
+                      </div>
+                      <div className="isum">{i.summary}</div>
+                      {(i.keyInsights||[]).map((ins,j)=><div key={j} className="iins">{ins}</div>)}
+                      {i.nextAction&&<div className="inext">→ {i.nextAction}</div>}
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      </div></>
+    );
+  }
+
+  // ── OPP DETAIL
+  if (detail?.type==='opp') {
+    const o = detail.item;
+    const oc = contacts.filter(c=>o.contactIds?.includes(c.id));
+    return (
+      <><style>{CSS}</style>
+      <div className="app">
+        <div className="hdr">
+          <div className="hdr-row">
+            <div className="dot"/>
+            <div><div className="hdr-title">SAFWAI <em>Sidekick</em></div><div className="hdr-sub">opportunity detail</div></div>
+            <DohaClock/>
+          </div>
+        </div>
+        <div className="scroll">
+          <div className="detail fade">
+            <button className="back" onClick={()=>{setDetail(null);setEditing(false);setTab(previousTab);}}>← back</button>
+            <div className="dcard">
+              <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:'8px'}}>
+                <div className="dname">{o.name}</div>
+                <button className="edit-btn" onClick={startEdit}>✎ Edit</button>
+              </div>
+              <div style={{display:'flex',gap:'6px',marginTop:'8px',flexWrap:'wrap'}}>
+                <span className="tag" style={{color:stageCol[o.stage]||'var(--text-muted)',borderColor:(stageCol[o.stage]||'var(--text-muted)')+'44'}}>{o.stage}</span>
+                {o.expectedValue>0&&<span className="tag" style={{color:'var(--accent)',borderColor:'var(--accent-dim)'}}>${o.expectedValue.toLocaleString()} exp</span>}
+                {o.cltv>0&&<span className="tag" style={{color:'var(--gold)',borderColor:'var(--gold)44'}}>${o.cltv.toLocaleString()} CLTV</span>}
+                <span className="tag" style={{color:'var(--text-muted)',borderColor:'var(--border)'}}>{o.probability}%</span>
+                {o.whereIsBall&&<span className="tag" style={{color:o.whereIsBall==='Ball in our court'?'var(--accent)':'var(--text-muted)',borderColor:o.whereIsBall==='Ball in our court'?'var(--accent-dim)':'var(--border)'}}>{o.whereIsBall==='Ball in our court'?'⚡ Our court':o.whereIsBall==='Meeting planned'?'📅 Meeting':'⏳ Their court'}</span>}
+              </div>
+            </div>
+
+            {editing && (
+              <div className="edit-form fade">
+                <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--accent)',textTransform:'uppercase',letterSpacing:'1px'}}>Editing Opportunity</div>
+                <div className="ef-field"><div className="ef-label">Name</div><input className="ef-input" value={editData.name||''} onChange={e=>setEditData({...editData,name:e.target.value})}/></div>
+                <div className="ef-row">
+                  <div className="ef-field"><div className="ef-label">Stage</div>
+                    <select className="ef-select" value={editData.stage||'1 - Prospect'} onChange={e=>setEditData({...editData,stage:e.target.value})}>
+                      {['0 - Not qualified','1 - Prospect','2 - Exploring','3 - Meeting planned','4 - Qualified','5 - RFP received','6 - Proposed','9 - Lost / Rekindle','9 - Lost'].map(s=><option key={s} value={s}>{s}</option>)}
+                    </select>
+                  </div>
+                  <div className="ef-field"><div className="ef-label">Probability %</div><input className="ef-input" type="number" min="0" max="100" value={editData.probability||0} onChange={e=>setEditData({...editData,probability:Number(e.target.value)})}/></div>
+                </div>
+                <div className="ef-row">
+                  <div className="ef-field"><div className="ef-label">Expected Value $</div><input className="ef-input" type="number" value={editData.expectedValue||0} onChange={e=>setEditData({...editData,expectedValue:Number(e.target.value)})}/></div>
+                  <div className="ef-field"><div className="ef-label">CLTV $</div><input className="ef-input" type="number" value={editData.cltv||0} onChange={e=>setEditData({...editData,cltv:Number(e.target.value)})}/></div>
+                </div>
+                <div className="ef-field"><div className="ef-label">Where is the ball?</div>
+                  <select className="ef-select" value={editData.whereIsBall||'Ball in their court'} onChange={e=>setEditData({...editData,whereIsBall:e.target.value})}>
+                    <option>Ball in our court</option><option>Ball in their court</option><option>Meeting planned</option>
+                  </select>
+                </div>
+                <div className="ef-field"><div className="ef-label">Next Action</div><input className="ef-input" value={editData.nextAction||''} onChange={e=>setEditData({...editData,nextAction:e.target.value})}/></div>
+                <div className="ef-field"><div className="ef-label">Notes</div><textarea className="ef-textarea" style={{minHeight:'70px'}} value={editData.notes||''} onChange={e=>setEditData({...editData,notes:e.target.value})}/></div>
+                <div className="ef-actions">
+                  <button className="save-btn" onClick={saveEdit}>Save</button>
+                  <button className="cancel-btn" onClick={()=>setEditing(false)}>Cancel</button>
+                </div>
+              </div>
+            )}
+            <div className="dcard">
+              <div className="fg"><div className="fl">Proposition</div><div className="fv">{o.proposition||'—'}</div></div>
+              {o.leadSource&&<div className="fg"><div className="fl">Lead Source</div><div className="fv">{o.leadSource}</div></div>}
+              <div className="fg"><div className="fl">Notes</div><div className="fv">{o.notes||'—'}</div></div>
+              <div style={{marginBottom:0}}><div className="fl">Next Action</div><div className="fv" style={{color:'var(--accent)'}}>{o.nextAction||'—'}</div></div>
+            </div>
+            {oc.length>0&&(
+              <div className="dcard">
+                <div className="fl" style={{marginBottom:'8px'}}>Linked Contacts</div>
+                {oc.map(c=>(
+                  <div key={c.id} style={{padding:'8px 10px',background:'var(--surface2)',borderRadius:'7px',border:'1px solid var(--border)',cursor:'pointer',marginBottom:'5px'}}
+                    onClick={()=>{setPreviousTab(tab);setDetail({type:'contact',item:c});}}>
+                    <div style={{fontSize:'12.5px',fontWeight:600}}>{c.name}</div>
+                    <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--text-dim)',marginTop:'2px'}}>{c.role} · {c.company}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div></>
+    );
+  }
+
+  /* ════════════════════════════════════════════════════════════
+     MAIN LAYOUT
+  ════════════════════════════════════════════════════════════ */
+  return (
+    <><style>{CSS}</style>
+    <div className="app" style={{colorScheme:'light',background:'#f4f1ed',color:'#1a1512'}}>
+
+      {/* HEADER */}
+      <div className="hdr">
+        <div className="hdr-row">
+          <div className="dot"/>
+          <div>
+            <div className="hdr-title">SAFWAI <em>Sidekick</em></div>
+            <div className="hdr-sub">personal coach · pipeline · memory · {contacts.length} contacts · {memories.length} insights</div>
+          </div>
+          <DohaClock/>
+        </div>
+      </div>
+
+      {/* NAV */}
+      <div className="nav">
+        <button className={`nb ${tab==='coach'?'on':''}`} onClick={()=>setTab('coach')}>◎ Coach</button>
+        <button className={`nb ${tab==='followup'?'on':''}`} onClick={()=>setTab('followup')}>🔴 Follow Up ({followups.length})</button>
+        <button className={`nb ${tab==='contacts'?'on':''}`} onClick={()=>setTab('contacts')}>👤 Contacts</button>
+        <button className={`nb ${tab==='pipeline'?'on':''}`} onClick={()=>setTab('pipeline')}>💼 Pipeline</button>
+        <button className={`nb ${tab==='kanban'?'on':''}`} onClick={()=>setTab('kanban')}>⊞ Actions</button>
+        <button className={`nb ${tab==='activity'?'on':''}`} onClick={()=>setTab('activity')}>📅 Activity ({interactions.length})</button>
+        <button className={`nb ${tab==='projects'?'on':''}`} onClick={()=>setTab('projects')}>📋 Projects ({projects.length})</button>
+        <button className={`nb blu ${tab==='inbox'?'on':''}`} onClick={()=>setTab('inbox')}>⚡ Inbox</button>
+        <button className={`nb grn ${tab==='memory'?'on':''}`} onClick={()=>setTab('memory')}>🧠 Memory ({memories.length})</button>
+        <button className={`nb ${tab==='log'?'on':''}`} onClick={()=>setTab('log')}>🗂 Log</button>
+      </div>
+
+      {/* ── COACH TAB ── */}
+      {tab==='coach'&&(
+        <>
+          <div className="scroll">
+            {messages.length===0?(
+              <div className="welcome">
+                <div className="wglyph">{agentGlyph}</div>
+                <div className="wline">{agentTagline}</div>
+                {memories.length>0&&<div style={{fontFamily:'var(--fm)',fontSize:'11px',color:'var(--green)'}}>◉ {memories.length} memories loaded · CRM synced</div>}
+                <div className="starters">
+                  {agentStarters.map((s,i)=><button key={i} className="starter" onClick={()=>send(s)}>{s}</button>)}
+                </div>
+              </div>
+            ):(
+              <>
+                {messages.map((m,i)=>(
+                  <div key={i} className={`msg ${m.role==='user'?'u':'a'}`}>
+                    <div className="mlabel">{m.role==='user'?'you':agentLabel}</div>
+                    <div className="bubble">{m.role==='assistant'?renderMd(m.content):m.content}</div>
+                  </div>
+                ))}
+                {loading&&(
+                  <div className="msg a">
+                    <div className="mlabel">{agentLabel}</div>
+                    <div className="typing"><div className="tdot"/><div className="tdot"/><div className="tdot"/></div>
+                  </div>
+                )}
+                {memToast&&<div className="mem-toast">◉ memory updated</div>}
+                {orchToast&&<div className="orch-toast">◉ {orchToast}</div>}
+
+                {/* ── INLINE ACTIVITY LOGGER — only appears when auto-detected or explicitly triggered ── */}
+                {pendingActivity&&(
+                  <div className="nc-suggest fade" style={{flexDirection:'column',gap:'8px'}}>
+                    <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--accent)',textTransform:'uppercase',letterSpacing:'1px'}}>Log Activity</div>
+                    <div style={{display:'flex',gap:'6px',flexWrap:'wrap'}}>
+                      <input className="ef-input" style={{flex:1,minWidth:'130px',fontSize:'13px',padding:'7px 10px'}}
+                        placeholder="Contact name" id="act-contact"
+                        defaultValue={pendingActivity.contactName||''}/>
+                      <select className="ef-select" style={{fontSize:'12px',padding:'7px 10px'}} id="act-type"
+                        defaultValue={pendingActivity.type||'note'}>
+                        <option value="call">📞 Call</option>
+                        <option value="meeting">🤝 Meeting</option>
+                        <option value="email">✉️ Email</option>
+                        <option value="whatsapp">💬 WhatsApp</option>
+                        <option value="note">📝 Note</option>
+                      </select>
+                    </div>
+                    <input className="ef-input" style={{fontSize:'13px',padding:'7px 10px'}}
+                      placeholder="What happened?" id="act-desc"
+                      defaultValue={pendingActivity.description||''}/>
+                    <div style={{display:'flex',gap:'7px'}}>
+                      <button className="nc-yes" style={{flex:1}} onClick={()=>{
+                        const desc = document.getElementById('act-desc')?.value||'';
+                        const contact = document.getElementById('act-contact')?.value||'';
+                        const type = document.getElementById('act-type')?.value||'note';
+                        if (desc.trim()) quickLogActivity(desc, contact, type);
+                        else setPendingActivity(null);
+                      }}>+ Save Activity</button>
+                      <button className="nc-no" onClick={()=>setPendingActivity(null)}>Cancel</button>
+                    </div>
+                  </div>
+                )}
+
+                {/* ── INLINE CONTACT QUEUE ── */}
+                {newContactSuggestion&&newContactSuggestion.names.length>0&&(
+                  <div className="nc-suggest fade" style={{flexDirection:'column',alignItems:'stretch',gap:'10px'}}>
+                    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                      <div className="nc-text" style={{flex:1}}>
+                        Add <strong style={{color:'var(--gold)'}}>{newContactSuggestion.names[0]}</strong> to your CRM?
+                        {newContactSuggestion.names.length>1&&<span style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--text-muted)',marginLeft:'6px'}}>{newContactSuggestion.names.length-1} more after this</span>}
+                      </div>
+                      <button className="nc-no" onClick={()=>setNewContactSuggestion(null)}>Skip all</button>
+                    </div>
+                    <div style={{display:'flex',flexDirection:'column',gap:'6px'}}>
+                      <div style={{display:'flex',gap:'6px',flexWrap:'wrap'}}>
+                        <input className="ef-input" style={{flex:1,minWidth:'140px',fontSize:'13px',padding:'7px 10px'}}
+                          placeholder="Company (optional)" id="nc-company"/>
+                        <input className="ef-input" style={{flex:1,minWidth:'120px',fontSize:'13px',padding:'7px 10px'}}
+                          placeholder="Role (optional)" id="nc-role"/>
+                      </div>
+                      <input className="ef-input" style={{fontSize:'13px',padding:'7px 10px'}}
+                        placeholder="Geography (optional)" id="nc-geo"/>
+                      <input className="ef-input" style={{fontSize:'13px',padding:'7px 10px'}}
+                        placeholder="Quick note — how you know them, context... (optional)" id="nc-notes"/>
+                    </div>
+                    <div style={{display:'flex',gap:'7px'}}>
+                      <button className="nc-yes" style={{flex:1}} onClick={async()=>{
+                        const company = document.getElementById('nc-company')?.value||'';
+                        const role = document.getElementById('nc-role')?.value||'';
+                        const geography = document.getElementById('nc-geo')?.value||'';
+                        const notes = document.getElementById('nc-notes')?.value||'';
+                        const c = {
+                          id:'c'+Date.now(),
+                          name:newContactSuggestion.names[0],
+                          company, role, geography,
+                          priority:'medium',
+                          lastContact:new Date().toISOString().split('T')[0],
+                          nextAction:'', relationship:'', notes,
+                          opportunityIds:[], interactionIds:[], interactions:[]
+                        };
+                        const updated=[...contacts,c];
+                        setContacts(updated);
+                        await sSet(SK.contacts,updated);
+                        const remaining = newContactSuggestion.names.slice(1);
+                        if (remaining.length>0) {
+                          setNewContactSuggestion({names:remaining});
+                          ['nc-company','nc-role','nc-geo','nc-notes'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+                        } else {
+                          setNewContactSuggestion(null);
+                        }
+                        setOrchToast(`✓ ${c.name} added to contacts`);
+                        setTimeout(()=>setOrchToast(''),3000);
+                      }}>+ Save {newContactSuggestion.names[0].split(' ')[0]}</button>
+                      <button className="nc-no" onClick={()=>{
+                        const remaining = newContactSuggestion.names.slice(1);
+                        remaining.length>0 ? setNewContactSuggestion({names:remaining}) : setNewContactSuggestion(null);
+                      }}>Skip</button>
+                    </div>
+                  </div>
+                )}
+
+                {/* ── INLINE OPP SUGGESTION ── */}
+                {newOppSuggestion&&(
+                  <div className="nc-suggest fade">
+                    <div className="nc-text">
+                      New opportunity: <strong style={{color:'var(--gold)'}}>{newOppSuggestion.name}</strong> — add to pipeline?
+                    </div>
+                    <button className="nc-yes" onClick={async()=>{
+                      const o = {
+                        id:'o'+Date.now(),
+                        name:newOppSuggestion.name,
+                        proposition:'', geography:'',
+                        stage:'1 - Prospect', probability:10,
+                        cltv:0, expectedValue:0,
+                        whereIsBall:'Ball in our court',
+                        nextAction:'', notes:'',
+                        contactIds:[], interactions:[]
+                      };
+                      const updated=[...opps,o];
+                      setOpps(updated);
+                      await sSet(SK.opps,updated);
+                      setNewOppSuggestion(null);
+                      setOrchToast(`✓ ${o.name} added to pipeline`);
+                      setTimeout(()=>setOrchToast(''),3000);
+                    }}>+ Add</button>
+                    <button className="nc-no" onClick={()=>setNewOppSuggestion(null)}>Dismiss</button>
+                  </div>
+                )}
+              </>
+            )}
+            <div ref={bottomRef}/>
+          </div>
+          <div className="input-area">
+            <div className="input-row">
+              <textarea ref={taRef} className="ta" value={input}
+                onChange={e=>{setInput(e.target.value);resize();}}
+                onKeyDown={onKey}
+                placeholder="Talk to your coach, share an email, ask about a contact... CRM + memory update automatically."
+                rows={1}/>
+              <button className="send" onClick={()=>send()} disabled={!input.trim()||loading}>→</button>
+            </div>
+            <div className="irow2">
+              {messages.length>0&&<button className="clr-btn" onClick={async()=>{
+                setMessages([]);
+                await saveChat('coach', []);
+              }}>clear conversation</button>}
+              <button style={{marginLeft:'auto',background:'none',border:'none',color:'var(--text-muted)',fontFamily:'var(--fm)',fontSize:'10px',cursor:'pointer',padding:'5px'}}
+                onClick={()=>setPendingActivity({description:'',contactName:'',type:'note'})}>
+                + log activity
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* ── KANBAN / ACTIONS TAB ── */}
+      {tab==='kanban'&&(
+        <KanbanTab kanban={kanban} setKanban={setKanban} contacts={contacts} opps={opps}
+          setPreviousTab={setPreviousTab} setDetail={setDetail} setEditing={setEditing}/>
+      )}
+
+      {/* ── FOLLOW UP TAB ── */}
+      {tab==='followup'&&(
+        <div className="scroll fade">
+          <div className="section-title">Action Required <span>priority + recency</span></div>
+          {followups.length===0
+            ?<div className="empty">All clear — no follow-ups needed right now.</div>
+            :followups.map(c=>{
+              const d=daysSince(c.lastContact);
+              const uc=d>14?"#c05050":d>7?"#c8903a":"var(--green)";
+              return (
+                <div key={c.id} className="card click" style={{position:'relative',paddingLeft:'17px'}}
+                  onClick={()=>{setPreviousTab(tab);setDetail({type:'contact',item:c});}}>
+                  <div style={{position:'absolute',left:0,top:0,bottom:0,width:'3px',background:prioCol[c.priority],borderRadius:'10px 0 0 10px'}}/>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:'8px'}}>
+                    <div>
+                      <div className="card-name">{c.name}</div>
+                      <div className="card-meta">{c.company} · {c.geography}</div>
+                    </div>
+                    <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:uc,background:uc+'18',border:`1px solid ${uc}44`,padding:'2px 8px',borderRadius:'10px',flexShrink:0}}>{d}d ago</div>
+                  </div>
+                  <div className="card-action"><strong style={{color:'var(--accent)'}}>→</strong> {c.nextAction}</div>
+                </div>
+              );
+            })
+          }
+        </div>
+      )}
+
+      {tab==='contacts'&&(
+        <div className="scroll fade">
+          <div className="section-title">Contacts <span>{contacts.length} people</span></div>
+
+          {showAddContact ? (
+            <div className="edit-form">
+              <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--accent)',textTransform:'uppercase',letterSpacing:'1px'}}>New Contact</div>
+              <div className="ef-row">
+                <div className="ef-field"><div className="ef-label">Name *</div><input className="ef-input" value={newContactData.name} onChange={e=>setNewContactData({...newContactData,name:e.target.value})} placeholder="Full name"/></div>
+                <div className="ef-field"><div className="ef-label">Company</div><input className="ef-input" value={newContactData.company} onChange={e=>setNewContactData({...newContactData,company:e.target.value})} placeholder="Company"/></div>
+              </div>
+              <div className="ef-row">
+                <div className="ef-field"><div className="ef-label">Role</div><input className="ef-input" value={newContactData.role} onChange={e=>setNewContactData({...newContactData,role:e.target.value})} placeholder="Role"/></div>
+                <div className="ef-field"><div className="ef-label">Geography</div><input className="ef-input" value={newContactData.geography} onChange={e=>setNewContactData({...newContactData,geography:e.target.value})} placeholder="Country / City"/></div>
+              </div>
+              <div className="ef-field"><div className="ef-label">Priority</div>
+                <select className="ef-select" value={newContactData.priority} onChange={e=>setNewContactData({...newContactData,priority:e.target.value})}>
+                  <option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option>
+                </select>
+              </div>
+              <div className="ef-field"><div className="ef-label">Relationship / Background</div><textarea className="ef-textarea" value={newContactData.relationship} onChange={e=>setNewContactData({...newContactData,relationship:e.target.value})} placeholder="How you know them..."/></div>
+              <div className="ef-field"><div className="ef-label">Next Action</div><input className="ef-input" value={newContactData.nextAction} onChange={e=>setNewContactData({...newContactData,nextAction:e.target.value})} placeholder="What needs to happen?"/></div>
+              <div className="ef-field"><div className="ef-label">Notes</div><textarea className="ef-textarea" value={newContactData.notes} onChange={e=>setNewContactData({...newContactData,notes:e.target.value})} placeholder="Context, background..."/></div>
+              <div className="ef-actions">
+                <button className="save-btn" onClick={addContact}>Save Contact</button>
+                <button className="cancel-btn" onClick={()=>{setShowAddContact(false);setNewContactData({name:'',company:'',role:'',geography:'',priority:'medium',relationship:'',nextAction:'',notes:''});}}>Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <button className="save-btn" style={{alignSelf:'flex-start',marginBottom:'4px'}} onClick={()=>setShowAddContact(true)}>+ Add Contact</button>
+          )}
+
+          {[...contacts].sort((a,b)=>(prio[a.priority]??3)-(prio[b.priority]??3)).map(c=>(
+            <div key={c.id} className="card click" onClick={()=>{setPreviousTab(tab);setDetail({type:'contact',item:c});setEditing(false);}}
+              style={{display:'flex',alignItems:'center',gap:'11px'}}>
+              <div style={{width:'32px',height:'32px',borderRadius:'50%',background:prioCol[c.priority]+'22',color:prioCol[c.priority],display:'flex',alignItems:'center',justifyContent:'center',fontFamily:'var(--fd)',fontSize:'14px',fontWeight:600,flexShrink:0}}>
+                {c.name.charAt(0)}
+              </div>
+              <div style={{flex:1,minWidth:0}}>
+                <div className="card-name" style={{fontSize:'13px'}}>{c.name}</div>
+                <div className="card-meta" style={{fontSize:'10px',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{c.role} · {c.company} · {c.geography}</div>
+              </div>
+              <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--text-muted)',flexShrink:0}}>{daysSince(c.lastContact)}d</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── ACTIVITY TAB ── */}
+      {tab==='activity'&&(
+        <div className="scroll fade">
+          <div className="section-title">Activity Feed <span>all interactions · newest first</span></div>
+          {interactions.length===0
+            ?<div className="empty">No interactions logged yet. Start logging calls, emails and meetings.</div>
+            :[...interactions].sort((a,b)=>new Date(b.date)-new Date(a.date)).map(ix=>{
+              const linkedContacts = contacts.filter(c=>ix.contactIds?.includes(c.id));
+              const linkedOpps = opps.filter(o=>ix.oppIds?.includes(o.id));
+              return (
+                <div key={ix.id} className="card" style={{borderLeft:`3px solid ${sentCol[ix.sentiment]||'var(--border)'}`,paddingLeft:'14px'}}>
+                  <div style={{display:'flex',alignItems:'center',gap:'7px',marginBottom:'5px',flexWrap:'wrap'}}>
+                    <span className="itype" style={{border:'1px solid var(--border)',borderRadius:'6px',padding:'1px 7px',fontFamily:'var(--fm)',fontSize:'9px',color:'var(--text-muted)'}}>{ix.type}</span>
+                    <span style={{fontFamily:'var(--fm)',fontSize:'9px',color:'var(--text-muted)'}}>{new Date(ix.date).toLocaleString('en-GB',{timeZone:'Asia/Qatar',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
+                    {ix.sentiment&&<span style={{fontFamily:'var(--fm)',fontSize:'9px',color:sentCol[ix.sentiment]||'var(--text-muted)',background:(sentCol[ix.sentiment]||'#44403a')+'18',border:`1px solid ${sentCol[ix.sentiment]||'#44403a'}44`,padding:'1px 6px',borderRadius:'6px'}}>{ix.sentiment}</span>}
+                    {ix.source&&<span style={{fontFamily:'var(--fm)',fontSize:'9px',color:'var(--text-muted)',fontStyle:'italic'}}>{ix.source}</span>}
+                  </div>
+                  {linkedContacts.length>0&&(
+                    <div style={{display:'flex',gap:'4px',marginBottom:'5px',flexWrap:'wrap'}}>
+                      {linkedContacts.map(c=>(
+                        <span key={c.id} className="tag" style={{color:prioCol[c.priority],borderColor:prioCol[c.priority]+'44',cursor:'pointer'}}
+                          onClick={()=>{setPreviousTab(tab);setDetail({type:'contact',item:c});setEditing(false);}}>
+                          {c.name}
+                        </span>
+                      ))}
+                      {linkedOpps.map(o=>(
+                        <span key={o.id} className="tag" style={{color:'var(--text-dim)',borderColor:'var(--border)',cursor:'pointer'}}
+                          onClick={()=>{setPreviousTab(tab);setDetail({type:'opp',item:o});setEditing(false);}}>
+                          {o.name}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{fontSize:'13px',color:'var(--text-dim)',lineHeight:'1.6'}}>{ix.summary}</div>
+                  {(ix.keyInsights||[]).map((ins,j)=><div key={j} className="iins" style={{marginTop:'4px'}}>{ins}</div>)}
+                  {ix.nextAction&&<div className="inext" style={{marginTop:'5px'}}>→ {ix.nextAction}</div>}
+                </div>
+              );
+            })
+          }
+        </div>
+      )}
+      {tab==='projects'&&(
+        <div className="scroll fade">
+          <div className="section-title">Open Projects <span>{projects.filter(p=>p.status!=='done').length} active</span></div>
+          {projects.map(p=>{
+            const sc = p.status==='done'?'var(--green)':p.status==='in_progress'?'var(--accent)':p.status==='ongoing'?'var(--blue)':p.status==='planned'?'var(--text-muted)':'var(--text-muted)';
+            const pc = p.priority==='critical'?'#e07030':p.priority==='high'?'#c8903a':p.priority==='medium'?'#68a87a':'#44403a';
+            return (
+              <div key={p.id} className="proj-card" style={{borderLeft:`3px solid ${pc}`}}>
+                <div style={{display:'flex',alignItems:'center',gap:'7px',flexWrap:'wrap'}}>
+                  <span className="proj-status" style={{color:sc,borderColor:sc+'44'}}>{p.status.replace('_',' ')}</span>
+                  <span className="proj-status" style={{color:pc,borderColor:pc+'44'}}>{p.priority}</span>
+                </div>
+                <div className="proj-name">{p.name}</div>
+                {p.nextAction&&<div className="proj-next"><span style={{color:'var(--accent)'}}>→</span> {p.nextAction}</div>}
+                {p.principle&&(
+                  <div style={{marginTop:'6px',padding:'6px 10px',background:'rgba(26,106,138,.06)',border:'1px solid rgba(26,106,138,.2)',borderLeft:'3px solid var(--blue)',borderRadius:'3px 7px 7px 3px',fontFamily:'var(--fm)',fontSize:'10px',color:'var(--blue)',lineHeight:'1.5'}}>
+                    ⚡ {p.principle}
+                  </div>
+                )}
+                {p.notes&&<div className="proj-notes">{p.notes}</div>}
+                <div style={{display:'flex',gap:'6px',marginTop:'9px',flexWrap:'wrap'}}>
+                  {['not_started','in_progress','ongoing','planned','done'].map(s=>(
+                    <button key={s} onClick={()=>updateProject(p.id,{status:s})}
+                      style={{padding:'3px 9px',borderRadius:'7px',border:`1px solid ${p.status===s?sc:'var(--border)'}`,background:p.status===s?sc+'18':'transparent',color:p.status===s?sc:'var(--text-muted)',fontFamily:'var(--fm)',fontSize:'9px',cursor:'pointer',transition:'all .15s'}}>
+                      {s.replace('_',' ')}
+                    </button>
+                  ))}
+                </div>
+                <input className="ef-input" style={{marginTop:'8px',fontSize:'12px'}} value={p.nextAction||''} placeholder="Next action..."
+                  onChange={e=>updateProject(p.id,{nextAction:e.target.value})}
+                  onBlur={()=>sSet(SK.projects, projects)}/>
+              </div>
+            );
+          })}
+          <AddProjectInput onAdd={addProject}/>
+        </div>
+      )}
+
+      {tab==='pipeline'&&(
+        <div className="scroll fade">
+          <div className="section-title">Pipeline <span>${opps.filter(o=>o.expectedValue>0).reduce((s,o)=>s+(o.expectedValue||0),0).toLocaleString()} weighted · {opps.length} opps</span></div>
+
+          {showAddOpp ? (
+            <div className="edit-form" style={{marginBottom:'4px'}}>
+              <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--accent)',textTransform:'uppercase',letterSpacing:'1px'}}>New Opportunity</div>
+              <div className="ef-field"><div className="ef-label">Name *</div><input className="ef-input" value={newOppData.name} onChange={e=>setNewOppData({...newOppData,name:e.target.value})} placeholder="Opportunity name"/></div>
+              <div className="ef-row">
+                <div className="ef-field"><div className="ef-label">Stage</div>
+                  <select className="ef-select" value={newOppData.stage} onChange={e=>setNewOppData({...newOppData,stage:e.target.value})}>
+                    {['1 - Prospect','2 - Exploring','3 - Meeting planned','4 - Qualified','5 - RFP received','6 - Proposed'].map(s=><option key={s}>{s}</option>)}
+                  </select>
+                </div>
+                <div className="ef-field"><div className="ef-label">Probability %</div><input className="ef-input" type="number" value={newOppData.probability} onChange={e=>setNewOppData({...newOppData,probability:e.target.value})}/></div>
+              </div>
+              <div className="ef-row">
+                <div className="ef-field"><div className="ef-label">Expected Value $</div><input className="ef-input" type="number" value={newOppData.expectedValue} onChange={e=>setNewOppData({...newOppData,expectedValue:e.target.value})}/></div>
+                <div className="ef-field"><div className="ef-label">Geography</div><input className="ef-input" value={newOppData.geography} onChange={e=>setNewOppData({...newOppData,geography:e.target.value})}/></div>
+              </div>
+              <div className="ef-field"><div className="ef-label">Where is the ball?</div>
+                <select className="ef-select" value={newOppData.whereIsBall} onChange={e=>setNewOppData({...newOppData,whereIsBall:e.target.value})}>
+                  <option>Ball in our court</option><option>Ball in their court</option><option>Meeting planned</option>
+                </select>
+              </div>
+              <div className="ef-field"><div className="ef-label">Next Action</div><input className="ef-input" value={newOppData.nextAction} onChange={e=>setNewOppData({...newOppData,nextAction:e.target.value})}/></div>
+              <div className="ef-field"><div className="ef-label">Notes</div><textarea className="ef-textarea" value={newOppData.notes} onChange={e=>setNewOppData({...newOppData,notes:e.target.value})}/></div>
+              <div className="ef-actions">
+                <button className="save-btn" onClick={addOpp}>Save Opportunity</button>
+                <button className="cancel-btn" onClick={()=>setShowAddOpp(false)}>Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <button className="save-btn" style={{alignSelf:'flex-start',marginBottom:'4px'}} onClick={()=>setShowAddOpp(true)}>+ Add Opportunity</button>
+          )}
+
+          {[...opps].sort((a,b)=>(b.expectedValue||0)-(a.expectedValue||0)).map(o=>{
+            const lc=contacts.filter(c=>o.contactIds?.includes(c.id));
+            return (
+              <div key={o.id} className="card click" onClick={()=>{setPreviousTab(tab);setDetail({type:'opp',item:o});setEditing(false);}}>
+                <div style={{display:'flex',justifyContent:'space-between',gap:'8px'}}>
+                  <div style={{fontWeight:600,fontSize:'13px',lineHeight:1.3}}>{o.name}</div>
+                  <div style={{fontFamily:'var(--fm)',fontSize:'12px',color:'var(--accent)',flexShrink:0}}>{o.expectedValue>0?'$'+o.expectedValue.toLocaleString():o.cltv>0?'$'+o.cltv.toLocaleString()+' CLTV':'TBD'}</div>
+                </div>
+                <div style={{display:'flex',gap:'5px',marginTop:'6px',flexWrap:'wrap'}}>
+                  <span className="tag" style={{color:stageCol[o.stage]||'var(--text-muted)',borderColor:(stageCol[o.stage]||'var(--text-muted)')+'44'}}>{o.stage}</span>
+                  <span className="tag" style={{color:'var(--text-muted)',borderColor:'var(--border)'}}>{o.probability}%</span>
+                  {o.whereIsBall&&<span className="tag" style={{color:o.whereIsBall==='Ball in our court'?'var(--accent)':o.whereIsBall==='Meeting planned'?'var(--blue)':'var(--text-muted)',borderColor:o.whereIsBall==='Ball in our court'?'var(--accent-dim)':o.whereIsBall==='Meeting planned'?'var(--blue)44':'var(--border)'}}>{o.whereIsBall==='Ball in our court'?'⚡ Our court':o.whereIsBall==='Meeting planned'?'📅 Meeting':'⏳ Their court'}</span>}
+                  {lc.map(c=><span key={c.id} className="tag" style={{color:'var(--text-dim)',borderColor:'var(--border)'}}>{c.name}</span>)}
+                </div>
+                {o.nextAction&&<div style={{fontSize:'12px',color:'var(--text-dim)',marginTop:'5px'}}>→ {o.nextAction}</div>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── INBOX / ORCHESTRATOR TAB ── */}
+      {tab==='inbox'&&(
+        <div className="scroll fade">
+          <div className="section-title">Inbox <span>paste any content — auto-routes to memory + crm</span></div>
+          <div className="orchpanel">
+            <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--blue)',textTransform:'uppercase',letterSpacing:'1px'}}>⚡ Process Input</div>
+            <div style={{display:'flex',gap:'5px',flexWrap:'wrap'}}>
+              {['whatsapp','email','call','meeting','note','transcript'].map(s=>(
+                <button key={s} className={`srcbtn ${orchSrc===s?'on':''}`} onClick={()=>setOrchSrc(s)}>
+                  {s==='whatsapp'?'💬':s==='email'?'✉️':s==='call'?'📞':s==='meeting'?'🤝':s==='transcript'?'🎙':'📝'} {s}
+                </button>
+              ))}
+            </div>
+            <textarea className="ita" value={orchInput} onChange={e=>setOrchInput(e.target.value)}
+              placeholder={`Paste ${orchSrc} content — the orchestrator reads it and automatically updates memory + CRM...`}/>
+            <button className="obtn" onClick={runOrch} disabled={!orchInput.trim()||orching}>
+              {orching?'⚡ Orchestrating...':'⚡ Process & Route →'}
+            </button>
+          </div>
+
+          {orchAgents.length>0&&(
+            <div style={{display:'flex',flexDirection:'column',gap:'5px'}}>
+              <div style={{fontFamily:'var(--fm)',fontSize:'9px',color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'1px',marginBottom:'2px'}}>Agent Pipeline</div>
+              {orchAgents.map((a,i)=>(
+                <div key={i} className="agrow">
+                  <div className="agdot" style={{background:a.status==='done'?'var(--green)':a.status==='running'?'var(--accent)':a.status==='error'?'var(--red)':'var(--text-muted)',animation:a.status==='running'?'pulse 1s ease-in-out infinite':'none'}}/>
+                  <div style={{flex:1}}>
+                    <div className="aglabel" style={{color:a.status==='running'?'var(--accent)':a.status==='done'?'var(--green)':'var(--text-muted)'}}>{a.label}</div>
+                    {a.detail&&<div style={{fontFamily:'var(--fm)',fontSize:'9px',color:'var(--text-muted)',marginTop:'1px'}}>{a.detail}</div>}
+                  </div>
+                  <div className="agmodel">{a.model}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {orchResult&&(
+            <div className="card fade">
+              <div style={{fontFamily:'var(--fd)',fontSize:'16px',fontStyle:'italic',marginBottom:'10px'}}>"{orchResult.plan.summary}"</div>
+              <div style={{display:'flex',gap:'6px',flexWrap:'wrap',marginBottom:'10px'}}>
+                {orchResult.savedCount>0&&<span style={{fontFamily:'var(--fm)',fontSize:'9px',color:'var(--green)',background:'rgba(104,168,122,.1)',border:'1px solid rgba(104,168,122,.25)',padding:'2px 8px',borderRadius:'10px'}}>◉ {orchResult.savedCount} memories</span>}
+                {orchResult.crmUpdates.length>0&&<span style={{fontFamily:'var(--fm)',fontSize:'9px',color:'var(--blue)',background:'rgba(90,138,154,.1)',border:'1px solid rgba(90,138,154,.25)',padding:'2px 8px',borderRadius:'10px'}}>◉ {orchResult.crmUpdates.length} CRM updates</span>}
+              </div>
+              {orchResult.plan.contactUpdates?.map((cu,i)=>(
+                <div key={i} className="ritem">
+                  <strong>{cu.contactName}</strong>
+                  <span style={{fontFamily:'var(--fm)',fontSize:'9px',color:sentCol[cu.sentiment]||'var(--text-muted)',marginLeft:'8px'}}>{cu.sentiment}</span>
+                  <div style={{marginTop:'4px'}}>{cu.summary}</div>
+                  {cu.nextAction&&<div className="rnext">→ {cu.nextAction}</div>}
+                </div>
+              ))}
+              {orchResult.plan.adhocInsight&&(
+                <div style={{background:'rgba(224,112,48,.06)',border:'1px solid var(--accent-dim)',borderRadius:'8px',padding:'10px 12px',fontSize:'13px',color:'var(--text-dim)',fontStyle:'italic',marginTop:'4px'}}>
+                  💡 {orchResult.plan.adhocInsight}
+                </div>
+              )}
+            </div>
+          )}
+
+          {orchLog.length>0&&(
+            <>
+              <div className="section-title" style={{marginTop:'4px'}}>Recent Orchestrations <span>{orchLog.length} total</span></div>
+              {orchLog.slice(0,10).map(e=>(
+                <div key={e.id} className="lentry">
+                  <div className="lmeta">
+                    <span className="ltime">{new Date(e.timestamp).toLocaleString('en-GB',{timeZone:'Asia/Qatar',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
+                    <span className="ltype">{e.source}</span>
+                    {e.memoriesSaved>0&&<span style={{fontFamily:'var(--fm)',fontSize:'9px',color:'var(--green)'}}>◉ {e.memoriesSaved} mem</span>}
+                    {e.crmUpdates?.length>0&&<span style={{fontFamily:'var(--fm)',fontSize:'9px',color:'var(--blue)'}}>◉ {e.crmUpdates.length} crm</span>}
+                  </div>
+                  <div className="lsum">{e.summary}</div>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── MEMORY TAB ── */}
+      {tab==='memory'&&(
+        <div className="scroll fade">
+          <div className="section-title">Memory Bank <span>{memories.length} insights stored</span></div>
+          <div style={{fontSize:'12px',color:'var(--text-dim)',lineHeight:'1.55',marginBottom:'4px'}}>
+            Extracted automatically from every coach conversation and inbox process. Injected into every agent session.
+          </div>
+
+          {/* Export / Import backup */}
+          <div className="import-box" style={{borderColor:'var(--blue)',background:'rgba(90,138,154,0.05)'}}>
+            <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--blue)',textTransform:'uppercase',letterSpacing:'1px'}}>💾 Data Backup — Export &amp; Restore</div>
+            <div style={{fontSize:'12px',color:'var(--text-dim)',lineHeight:'1.5'}}>Export all your data before any new build. Storage keys never change, but this gives you a safety net.</div>
+            <div style={{display:'flex',gap:'7px',flexWrap:'wrap'}}>
+              <button className="mabtn" style={{borderColor:'var(--blue)',color:'var(--blue)',background:'rgba(90,138,154,.1)'}} onClick={async()=>{
+                const backup = {
+                  exportedAt: new Date().toISOString(),
+                  storageKeys: SK,
+                  memories, contacts, opps, projects, orchLog, interactions, chats: savedChats, kanban
+                };
+                const blob = new Blob([JSON.stringify(backup, null, 2)], {type:'application/json'});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `safwai-sidekick-backup-${new Date().toISOString().split('T')[0]}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+              }}>⬇ Export All Data</button>
+              <label className="mabtn" style={{borderColor:'var(--blue)',color:'var(--blue)',background:'rgba(90,138,154,.1)',cursor:'pointer'}}>
+                ⬆ Restore from Backup
+                <input type="file" accept=".json" style={{display:'none'}} onChange={async(e)=>{
+                  const file = e.target.files[0];
+                  if (!file) return;
+                  try {
+                    const text = await file.text();
+                    const backup = JSON.parse(text);
+                    if (backup.memories) { setMemories(backup.memories); await sSet(SK.memory, backup.memories); }
+                    if (backup.contacts) { setContacts(backup.contacts); await sSet(SK.contacts, backup.contacts); }
+                    if (backup.opps) { setOpps(backup.opps); await sSet(SK.opps, backup.opps); }
+                    if (backup.projects) { setProjects(backup.projects); await sSet(SK.projects, backup.projects); }
+                    if (backup.orchLog) { setOrchLog(backup.orchLog); await sSet(SK.log, backup.orchLog); }
+                    if (backup.interactions) { setInteractions(backup.interactions); await sSet(SK.interactions, backup.interactions); }
+                    if (backup.chats) { setSavedChats(backup.chats); await sSet(SK.chats, backup.chats); }
+                    if (backup.kanban) { setKanban(backup.kanban); await sSet(SK.kanban, backup.kanban); }
+                    alert(`✓ Restored: ${backup.memories?.length||0} memories, ${backup.contacts?.length||0} contacts, ${backup.opps?.length||0} opportunities, ${backup.interactions?.length||0} interactions.`);
+                  } catch(err) { alert('Restore failed — invalid backup file.'); }
+                  e.target.value = '';
+                }}/>
+              </label>
+            </div>
+          </div>
+
+          {memories.length===0
+            ?<div className="empty">No memories yet. Start talking to your coach.</div>
+            :memories.slice().reverse().map((m,i)=>(
+              <div key={m.id||i} className="mentry">
+                <div className="mmeta">{String(m.agent||'unknown')==='manual'?'added manually':`from ${String(m.agent||'unknown')}`} · {m.timestamp?new Date(m.timestamp).toLocaleDateString('en-GB',{timeZone:'Asia/Qatar'}):''}</div>
+                <div className="mtext">{typeof m.text === 'string' ? m.text : typeof m === 'string' ? m : JSON.stringify(m)}</div>
+                <button className="mdel" onClick={()=>deleteMem(m.id)}>×</button>
+              </div>
+            ))
+          }
+          <div style={{display:'flex',gap:'7px',marginTop:'4px'}}>
+            <input className="minput" value={newMem} onChange={e=>setNewMem(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addMem()} placeholder="Add memory manually..."/>
+            <button className="mabtn" onClick={addMem} disabled={!newMem.trim()}>+ Save</button>
+          </div>
+          <div className="import-box">
+            <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--accent)',textTransform:'uppercase',letterSpacing:'1px'}}>Session Import — AI Agent (Haiku 4.5)</div>
+            <div style={{fontSize:'12px',color:'var(--text-dim)',lineHeight:'1.5'}}>Paste a conversation summary, notes, or any context. AI extracts all memories automatically.</div>
+            <textarea className="ita" value={importText} onChange={e=>setImportText(e.target.value)} placeholder="Paste session summary here..."/>
+            <button className="mabtn" style={{background:'var(--accent-glow)',borderColor:'var(--accent-dim)',color:'var(--accent)'}} onClick={importSession} disabled={importing||!importText.trim()}>
+              {importing?`${importRes?.msg||'Processing...'}`:'→ Extract & Save Memories'}
+            </button>
+            {importRes?.status==='ok'&&<div style={{fontFamily:'var(--fm)',fontSize:'11px',color:'var(--green)'}}>◉ {importRes.count} memories extracted and saved.</div>}
+            {importRes?.status==='error'&&<div style={{fontFamily:'var(--fm)',fontSize:'11px',color:'var(--red)'}}>✕ {importRes.msg}</div>}
+          </div>
+        </div>
+      )}
+
+      {/* ── LOG TAB ── */}
+      {tab==='log'&&(
+        <div className="scroll fade">
+          <div className="section-title">Orchestration Log <span>{orchLog.length} entries</span></div>
+          {orchLog.length===0
+            ?<div className="empty">No orchestrations yet.</div>
+            :orchLog.map(e=>(
+              <div key={e.id} className="lentry">
+                <div className="lmeta">
+                  <span className="ltime">{new Date(e.timestamp).toLocaleString('en-GB',{timeZone:'Asia/Qatar',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
+                  <span className="ltype">{e.source}</span>
+                  {e.memoriesSaved>0&&<span style={{fontFamily:'var(--fm)',fontSize:'9px',color:'var(--green)'}}>◉ {e.memoriesSaved} mem</span>}
+                  {e.crmUpdates?.length>0&&<span style={{fontFamily:'var(--fm)',fontSize:'9px',color:'var(--blue)'}}>◉ {e.crmUpdates.length} crm</span>}
+                </div>
+                <div className="lsum">{e.summary}</div>
+                {e.adhocInsight&&<div style={{fontFamily:'var(--fd)',fontSize:'12px',fontStyle:'italic',color:'var(--text-muted)',marginTop:'4px'}}>💡 {e.adhocInsight}</div>}
+                {e.contactsInvolved?.length>0&&(
+                  <div style={{display:'flex',gap:'4px',marginTop:'5px',flexWrap:'wrap'}}>
+                    {e.contactsInvolved.map((n,i)=><span key={i} className="tag" style={{color:'var(--text-muted)',borderColor:'var(--border)'}}>{n}</span>)}
+                  </div>
+                )}
+              </div>
+            ))
+          }
+        </div>
+      )}
+
+    </div></>
+  );
+}
+
+
+// Mount
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<SAFWAISidekick/>);
+</script>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════
+   SERVICE WORKER — enables PWA install + offline shell
+═══════════════════════════════════════════════════════════════ */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    // Inline service worker as blob — no separate sw.js file needed
+    const swCode = `
+      const CACHE = 'safwai-v1';
+      self.addEventListener('install', e => {
+        self.skipWaiting();
+      });
+      self.addEventListener('activate', e => {
+        e.waitUntil(clients.claim());
+      });
+      // Network-first: always try network, fall back to cache
+      self.addEventListener('fetch', e => {
+        if (e.request.method !== 'GET') return;
+        e.respondWith(
+          fetch(e.request)
+            .then(r => {
+              const clone = r.clone();
+              caches.open(CACHE).then(c => c.put(e.request, clone));
+              return r;
+            })
+            .catch(() => caches.match(e.request))
+        );
+      });
+    `;
+    const blob = new Blob([swCode], { type: 'application/javascript' });
+    const swUrl = URL.createObjectURL(blob);
+    navigator.serviceWorker.register(swUrl).catch(() => {});
+  });
+}
+</script>
+</body>
+</html>
