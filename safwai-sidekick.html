@@ -640,7 +640,7 @@ const CSS = `
   .ka-row{display:flex;gap:6px}
 `;
 
-function KanbanTab({kanban, setKanban, contacts, opps, setPreviousTab, setDetail, setEditing, setTab, setInput, setCoachMode}) {
+function KanbanTab({kanban, setKanban, contacts, opps, setPreviousTab, setDetail, setEditing, setTab, setInput, setCoachMode, setPendingContext}) {
   const [addingTo, setAddingTo] = useState(null);
   const [newCard, setNewCard] = useState({title:'',theme:'pipeline',priority:'medium',notes:'',contactId:'',oppId:''});
 
@@ -1898,7 +1898,7 @@ function SAFWAISidekick() {
       {tab==='kanban'&&(
         <KanbanTab kanban={kanban} setKanban={setKanban} contacts={contacts} opps={opps}
           setPreviousTab={setPreviousTab} setDetail={setDetail} setEditing={setEditing}
-          setTab={setTab} setInput={setInput} setCoachMode={setCoachMode}/>
+          setTab={setTab} setInput={setInput} setCoachMode={setCoachMode} setPendingContext={setPendingContext}/>
       )}
 
 
