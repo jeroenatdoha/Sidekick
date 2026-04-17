@@ -1103,9 +1103,10 @@ function SAFWAISidekick() {
 
       // 2. Context hydration — use pre-built context (from card) or extract from message
       let ctx = '';
-      if (pendingContext) {
-        ctx = pendingContext;
-        setPendingContext('');
+      const resolvedContext = pendingContext;
+      setPendingContext(''); // always clear, whether used or not
+      if (resolvedContext) {
+        ctx = resolvedContext;
       } else {
         try {
           const extractedRaw = await apiCall(M.fast, CONTEXT_EXTRACTOR_P, msg, 150);
