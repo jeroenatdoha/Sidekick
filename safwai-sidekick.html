@@ -232,7 +232,12 @@ const SEED_KANBAN = [
   {id:"k6",title:"Write IBSP AI SIG LinkedIn post",col:"doing",theme:"marketing",priority:"high",contactId:null,oppId:null,notes:"James asked within 24hrs. Inaugural meeting highlights + invite to join IBSP.",createdAt:new Date().toISOString()},
   {id:"k7",title:"Lead IBSP AI SIG task force — organise first working session",col:"inview",theme:"marketing",priority:"medium",contactId:null,oppId:null,notes:"Confirmed as lead. Bob stepping back. Brian + Sander involved. Goal: solid base by end of year.",createdAt:new Date().toISOString()},
   {id:"k8",title:"Articulate 5 D365 use cases as a document",col:"backlog",theme:"marketing",priority:"medium",contactId:null,oppId:null,notes:"Use IBSP transcript + Jakob meeting insights. Foundation for IBSP positioning.",createdAt:new Date().toISOString()},
-  // Projects
+  // Follow-up cards — previously in the Follow Up tab, now in Actions kanban
+  {id:"k13",title:"Follow up: Mark Geerars — 13+ days no reply",col:"inview",theme:"followup",priority:"high",contactId:"c4",oppId:"o4",notes:"Ghosting since April 2. $21k deal. One short message this week.",createdAt:new Date().toISOString()},
+  {id:"k14",title:"Follow up: Ayman (Doha Bank) — friendly call",col:"backlog",theme:"followup",priority:"medium",contactId:"c7",oppId:"o7",notes:"No pitch. Call as a friend. Timing post-conflict.",createdAt:new Date().toISOString()},
+  {id:"k15",title:"Follow up: Mohamed (QPMC) — post-Ramadan PoC status",col:"backlog",theme:"followup",priority:"high",contactId:"c11",oppId:"o12",notes:"Advanced discussions. Multiple PoC companies. Al Salam ahead.",createdAt:new Date().toISOString()},
+  {id:"k16",title:"Follow up: Amar Shubar — ball in our court",col:"backlog",theme:"followup",priority:"medium",contactId:"c13",oppId:"o14",notes:"AI for consulting $25k CLTV. Spoke with founder.",createdAt:new Date().toISOString()},
+  {id:"k17",title:"Develop Taskeen KSA proposal (Faraz)",col:"inview",theme:"followup",priority:"high",contactId:"c15",oppId:"o16",notes:"Top priority RFP — Digital Transformation KSA.",createdAt:new Date().toISOString()},
   {id:"k9",title:"Run session import in Sidekick memory",col:"doing",theme:"project",priority:"high",contactId:null,oppId:null,notes:"Paste the 18-hour session summary. Seeds the Sidekick with all context from 16 April.",createdAt:new Date().toISOString()},
   {id:"k10",title:"Build Sidekick PWA",col:"backlog",theme:"project",priority:"high",contactId:null,oppId:null,notes:"Full screen, home screen install, no Claude chrome. Solves mobile problem permanently. Plan: end of today or weekend.",createdAt:new Date().toISOString()},
   {id:"k11",title:"Update LinkedIn profile",col:"backlog",theme:"project",priority:"medium",contactId:null,oppId:null,notes:"Reflect Gysho partnership, agentic AI expertise, IBSP AI SIG lead role.",createdAt:new Date().toISOString()},
@@ -562,7 +567,20 @@ function KanbanTab({kanban, setKanban, contacts, opps, setPreviousTab, setDetail
   };
   const deleteCard = async (id) => { await saveKanban(kanban.filter(c=>c.id!==id)); };
 
-  const themeColor = {pipeline:'#c85a18',marketing:'#155878',project:'#1e6e30',personal:'#8a5e08'};
+  const themeColor = {
+    pipeline: '#c85a18',   // orange — pipeline/sales
+    marketing: '#155878',  // blue — marketing/content
+    project: '#1e6e30',    // green — internal projects
+    personal: '#8a5e08',   // gold — personal
+    followup: '#8a1a1a',   // deep red — follow-ups
+  };
+  const themeBg = {
+    pipeline: 'rgba(200,90,24,.06)',
+    marketing: 'rgba(21,88,120,.06)',
+    project: 'rgba(30,110,48,.06)',
+    personal: 'rgba(138,94,8,.06)',
+    followup: 'rgba(138,26,26,.06)',
+  };
   const prioColor = {critical:'#c85a18',high:'#c8903a',medium:'#1e6e30',low:'#8a7a6a'};
 
   const doAdd = async () => {
@@ -577,9 +595,17 @@ function KanbanTab({kanban, setKanban, contacts, opps, setPreviousTab, setDetail
 
   return (
     <div style={{display:'flex',flexDirection:'column',height:'100%',overflow:'hidden'}}>
-      <div style={{padding:'10px 16px 6px',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+      <div style={{padding:'10px 16px 6px',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:'6px'}}>
         <div className="section-title" style={{marginBottom:0}}>Actions <span>{kanban.filter(c=>c.col!=='done').length} open</span></div>
-        <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--text-muted)'}}>scroll →</div>
+        <div style={{display:'flex',gap:'8px',flexWrap:'wrap',alignItems:'center'}}>
+          {Object.entries(themeColor).map(([theme,color])=>(
+            <div key={theme} style={{display:'flex',alignItems:'center',gap:'3px'}}>
+              <div style={{width:'8px',height:'8px',borderRadius:'50%',background:color,flexShrink:0}}/>
+              <span style={{fontFamily:'var(--fm)',fontSize:'9px',color:'var(--text-muted)',textTransform:'capitalize'}}>{theme}</span>
+            </div>
+          ))}
+          <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--text-muted)',marginLeft:'4px'}}>scroll →</div>
+        </div>
       </div>
       <div className="kanban-wrap">
         {KANBAN_COLS.map(col=>{
@@ -599,7 +625,8 @@ function KanbanTab({kanban, setKanban, contacts, opps, setPreviousTab, setDetail
                 const prevCol = colIdx > 0 ? KANBAN_COLS[colIdx-1] : null;
                 const nextCol = colIdx < KANBAN_COLS.length-1 ? KANBAN_COLS[colIdx+1] : null;
                 return (
-                  <div key={card.id} className={`kanban-card ${col==='done'?'done-card':''}`}>
+                  <div key={card.id} className={`kanban-card ${col==='done'?'done-card':''}`}
+                    style={{borderLeft:`3px solid ${themeColor[card.theme]||'var(--border)'}`,background:col==='done'?'var(--surface)':themeBg[card.theme]||'var(--surface)'}}>
                     <div className="kc-prio" style={{background:prioColor[card.priority]||'var(--text-muted)'}}/>
                     <div className="kc-theme" style={{color:themeColor[card.theme]||'var(--text-muted)'}}>{card.theme}</div>
                     <div className="kc-title">{card.title}</div>
@@ -623,6 +650,7 @@ function KanbanTab({kanban, setKanban, contacts, opps, setPreviousTab, setDetail
                   <div className="ka-row">
                     <select className="ka-select" value={newCard.theme} onChange={e=>setNewCard({...newCard,theme:e.target.value})}>
                       <option value="pipeline">Pipeline</option>
+                      <option value="followup">Follow-up</option>
                       <option value="marketing">Marketing</option>
                       <option value="project">Project</option>
                       <option value="personal">Personal</option>
@@ -813,8 +841,9 @@ function SAFWAISidekick() {
         name.toLowerCase().includes(o.name.toLowerCase().split(' ')[0])
       );
 
-      // Filter to only truly unknown names/opps
-      const unknownNames = (crmPlan?.allNamesDetected||[]).filter(n => !isKnownContact(n));
+      // Filter to only truly unknown names/opps — exclude self
+      const SELF_NAME = 'jeroen';
+      const unknownNames = (crmPlan?.allNamesDetected||[]).filter(n => !isKnownContact(n) && !n.toLowerCase().includes(SELF_NAME));
       const unknownOpps  = (crmPlan?.allOppsDetected||[]).filter(o => !isKnownOpp(o));
 
       // Inject back for downstream use
@@ -1552,10 +1581,9 @@ function SAFWAISidekick() {
       {/* NAV */}
       <div className="nav">
         <button className={`nb ${tab==='coach'?'on':''}`} onClick={()=>setTab('coach')}>◎ Coach</button>
-        <button className={`nb ${tab==='followup'?'on':''}`} onClick={()=>setTab('followup')}>🔴 Follow Up ({followups.length})</button>
+        <button className={`nb ${tab==='kanban'?'on':''}`} onClick={()=>setTab('kanban')}>⊞ Actions ({kanban.filter(c=>c.col!=='done').length})</button>
         <button className={`nb ${tab==='contacts'?'on':''}`} onClick={()=>setTab('contacts')}>👤 Contacts</button>
         <button className={`nb ${tab==='pipeline'?'on':''}`} onClick={()=>setTab('pipeline')}>💼 Pipeline</button>
-        <button className={`nb ${tab==='kanban'?'on':''}`} onClick={()=>setTab('kanban')}>⊞ Actions</button>
         <button className={`nb ${tab==='activity'?'on':''}`} onClick={()=>setTab('activity')}>📅 Activity ({interactions.length})</button>
         <button className={`nb ${tab==='projects'?'on':''}`} onClick={()=>setTab('projects')}>📋 Projects ({projects.length})</button>
         <button className={`nb blu ${tab==='inbox'?'on':''}`} onClick={()=>setTab('inbox')}>⚡ Inbox</button>
@@ -1744,33 +1772,7 @@ function SAFWAISidekick() {
           setPreviousTab={setPreviousTab} setDetail={setDetail} setEditing={setEditing}/>
       )}
 
-      {/* ── FOLLOW UP TAB ── */}
-      {tab==='followup'&&(
-        <div className="scroll fade">
-          <div className="section-title">Action Required <span>priority + recency</span></div>
-          {followups.length===0
-            ?<div className="empty">All clear — no follow-ups needed right now.</div>
-            :followups.map(c=>{
-              const d=daysSince(c.lastContact);
-              const uc=d>14?"#c05050":d>7?"#c8903a":"var(--green)";
-              return (
-                <div key={c.id} className="card click" style={{position:'relative',paddingLeft:'17px'}}
-                  onClick={()=>{setPreviousTab(tab);setDetail({type:'contact',item:c});}}>
-                  <div style={{position:'absolute',left:0,top:0,bottom:0,width:'3px',background:prioCol[c.priority],borderRadius:'10px 0 0 10px'}}/>
-                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:'8px'}}>
-                    <div>
-                      <div className="card-name">{c.name}</div>
-                      <div className="card-meta">{c.company} · {c.geography}</div>
-                    </div>
-                    <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:uc,background:uc+'18',border:`1px solid ${uc}44`,padding:'2px 8px',borderRadius:'10px',flexShrink:0}}>{d}d ago</div>
-                  </div>
-                  <div className="card-action"><strong style={{color:'var(--accent)'}}>→</strong> {c.nextAction}</div>
-                </div>
-              );
-            })
-          }
-        </div>
-      )}
+
 
       {tab==='contacts'&&(
         <div className="scroll fade">
