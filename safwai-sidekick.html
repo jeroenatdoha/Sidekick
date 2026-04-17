@@ -110,18 +110,69 @@ Most active lead: Erik van der Steen (UAE) — enterprise C-suite AI coach on Gy
 /* ═══════════════════════════════════════════════════════════════
    AGENT PROMPTS
 ═══════════════════════════════════════════════════════════════ */
-const buildCoachPrompt = (mems, mode) => {
+const buildCoachPrompt = (mems, mode, ctx='') => {
   const mb = mems.length ? `\nMemories:\n${mems.slice(-15).map(m=>`- ${m.text}`).join('\n')}\n` : '';
+  const cb = ctx ? `\n${ctx}\n` : '';
   if (mode === 'taskbreaker') return `You are a task paralysis specialist. One job: the tiniest possible first move.\n\n${JC}${mb}\nFormula:\n1. One sentence acknowledging the paralysis — make him feel seen\n2. THE single smallest first step — so specific it almost feels silly\n3. One sentence on why starting beats finishing\nMax 5 sentences. Movement only.`;
   if (mode === 'braindump') return `You are a brain organiser. Transform mental chaos into clarity.\n\n${JC}${mb}\nALWAYS use this format:\n\n**Heard:** [core chaos in one sentence]\n\n**What matters today:**\n• [item 1]\n• [item 2]\n• [item 3 — only if urgent]\n\n**Batch or delegate:** [1-2 items that don't need your direct attention — or "None today"]\n\n**Start here →** [one concrete first action]`;
-  return `You are Jeroen's personal coach and business advisor. Warm, sharp, genuinely invested.\n\n${JC}${mb}\nPrinciples:\n→ Different operating system, not defective — task paralysis is neurological, not weakness\n→ 54-year late diagnosis = a lifetime of confusion now making sense\n→ If an email or content is shared, recommend next steps AND flag CRM relevance\n\nCRITICAL — be honest about what auto-updates:\n→ Memory insights: YES, extracted automatically after every exchange\n→ Contact next actions + last contact date: YES, updated automatically when a contact is discussed\n→ Pipeline stage changes: YES, if you explicitly mention a deal moving\n→ Project status: YES, if you mention a project progressing\n→ Activities (real-world calls/meetings/emails with people): PARTIAL — detected automatically when user DESCRIBES a real interaction. But if it's unclear, say "I'll add a Log Activity button so you can confirm this in one tap" — do NOT say you logged it if you're not certain.\n\nRespond:\n• SHORT — 3-5 sentences. Busy brain needs brevity.\n• ONE clear action or insight\n• Direct and warm. Zero filler.\n• Never claim to have logged an activity unless the user clearly described a real-world interaction in this message.\n• If you're unsure whether something should be logged as an activity, say so and prompt the user to confirm.`;
+  return `You are Jeroen's personal coach and business advisor. Warm, sharp, genuinely invested.\n\n${JC}${mb}${cb}\nPrinciples:\n→ Different operating system, not defective — task paralysis is neurological, not weakness\n→ 54-year late diagnosis = a lifetime of confusion now making sense\n→ If an email or content is shared, recommend next steps AND flag CRM relevance\n\nCRITICAL — be honest about what auto-updates:\n→ Memory insights: YES, extracted automatically after every exchange\n→ Contact next actions + last contact date: YES, updated automatically when a contact is discussed\n→ Pipeline stage changes: YES, if you explicitly mention a deal moving\n→ Project status: YES, if you mention a project progressing\n→ Activities (real-world calls/meetings/emails with people): PARTIAL — detected automatically when user DESCRIBES a real interaction. But if it's unclear, say "I'll add a Log Activity button so you can confirm this in one tap" — do NOT say you logged it if you're not certain.\n\nRespond:\n• SHORT — 3-5 sentences. Busy brain needs brevity.\n• ONE clear action or insight\n• Direct and warm. Zero filler.\n• Never claim to have logged an activity unless the user clearly described a real-world interaction in this message.\n• If you're unsure whether something should be logged as an activity, say so and prompt the user to confirm.`;
 };
+
+// ── CONTEXT HYDRATION
+const CONTEXT_EXTRACTOR_P = `You are an entity extractor. Read a user message and return a JSON object with:
+- "names": array of person or company names mentioned (first names, last names, company names)
+- "keywords": array of topic keywords that might match a task or project (e.g. "LinkedIn", "IBSP", "Gysho", "proposal")
+Return ONLY valid JSON. Example: {"names":["Erik","Saleh"],"keywords":["LinkedIn post","proposal"]}. No markdown.`;
+
+function hydrateContext(extracted, contacts, opps, kanban) {
+  const { names = [], keywords = [] } = extracted;
+  const matches = { contacts: [], opps: [], cards: [] };
+
+  // Match contacts — by name fragments
+  contacts.forEach(c => {
+    const hay = (c.name + ' ' + (c.company||'')).toLowerCase();
+    if (names.some(n => hay.includes(n.toLowerCase()))) matches.contacts.push(c);
+  });
+
+  // Match opps — by name or company
+  opps.forEach(o => {
+    const hay = (o.name + ' ' + (o.company||'')).toLowerCase();
+    const nameHit = names.some(n => hay.includes(n.toLowerCase()));
+    const kwHit = keywords.some(k => hay.includes(k.toLowerCase()));
+    // Also match if linked contact already matched
+    const contactHit = matches.contacts.some(c => c.id === o.contactId);
+    if (nameHit || kwHit || contactHit) matches.opps.push(o);
+  });
+
+  // Match kanban cards — by title or notes keywords
+  kanban.filter(c => c.col !== 'done').forEach(card => {
+    const hay = (card.title + ' ' + (card.notes||'')).toLowerCase();
+    const nameHit = names.some(n => hay.includes(n.toLowerCase()));
+    const kwHit = keywords.some(k => hay.includes(k.toLowerCase()));
+    if (nameHit || kwHit) matches.cards.push(card);
+  });
+
+  if (!matches.contacts.length && !matches.opps.length && !matches.cards.length) return '';
+
+  const lines = ['--- Relevant context for this message ---'];
+  matches.contacts.forEach(c => {
+    lines.push(`Contact: ${c.name}${c.company?' ('+c.company+')':''} | Last contact: ${c.lastContact||'unknown'} | Next action: ${c.nextAction||'none'}`);
+  });
+  matches.opps.forEach(o => {
+    lines.push(`Opportunity: ${o.name} | Stage: ${o.stage||'unknown'} | Value: ${o.value?'$'+o.value:'unknown'} | Next action: ${o.nextAction||'none'}`);
+  });
+  matches.cards.forEach(card => {
+    lines.push(`Kanban task [${card.col}]: ${card.title}${card.notes?' — '+card.notes:''}`);
+  });
+  lines.push('--- End context ---');
+  return lines.join('\n');
+}
 
 const ROUTER_P = `You are a routing agent. Read a user message and decide which specialist agent should handle it.
 
 Agents available:
 - "coach" — general coaching, advice, thinking through problems, sharing news, asking questions, sharing emails or messages
-- "taskbreaker" — user is explicitly stuck on starting a specific task and needs the smallest possible first step
+- "taskbreaker" — user is explicitly stuck on STARTING and says so (e.g. "I can't start", "I'm stuck", "I don't know where to begin") — NOT when they name a task and say they want to work on it
 - "braindump" — user wants to dump everything on their mind and get structured clarity
 
 Return ONLY one word: coach, taskbreaker, or braindump. Nothing else.`;
@@ -556,7 +607,7 @@ const CSS = `
   .ka-row{display:flex;gap:6px}
 `;
 
-function KanbanTab({kanban, setKanban, contacts, opps, setPreviousTab, setDetail, setEditing}) {
+function KanbanTab({kanban, setKanban, contacts, opps, setPreviousTab, setDetail, setEditing, setTab, setInput, setCoachMode}) {
   const [addingTo, setAddingTo] = useState(null);
   const [newCard, setNewCard] = useState({title:'',theme:'pipeline',priority:'medium',notes:'',contactId:'',oppId:''});
 
@@ -582,6 +633,14 @@ function KanbanTab({kanban, setKanban, contacts, opps, setPreviousTab, setDetail
     followup: 'rgba(138,26,26,.06)',
   };
   const prioColor = {critical:'#c85a18',high:'#c8903a',medium:'#1e6e30',low:'#8a7a6a'};
+
+  const workOnCard = (card) => {
+    const msg = `Work on this task: "${card.title}"${card.notes ? `\n\nContext: ${card.notes}` : ''}`;
+    setCoachMode('coach');
+    setInput(msg);
+    setPreviousTab('kanban');
+    setTab('coach');
+  };
 
   const doAdd = async () => {
     if (!newCard.title.trim()) return;
@@ -636,6 +695,7 @@ function KanbanTab({kanban, setKanban, contacts, opps, setPreviousTab, setDetail
                     <div className="kc-actions">
                       {nextCol&&<button className="kc-btn primary" onClick={()=>moveCard(card.id,nextCol)}>→ {KANBAN_COL_LABELS[nextCol]}</button>}
                       {prevCol&&<button className="kc-btn" onClick={()=>moveCard(card.id,prevCol)}>← Back</button>}
+                      {col!=='done'&&<button className="kc-btn" onClick={()=>workOnCard(card)} style={{color:'var(--accent)',borderColor:'var(--accent-dim)'}}>▶ Work on this</button>}
                       <button className="kc-btn" onClick={()=>deleteCard(card.id)} style={{marginLeft:'auto',color:'var(--red)',borderColor:'transparent'}}>✕</button>
                     </div>
                   </div>
@@ -1033,8 +1093,16 @@ function SAFWAISidekick() {
       } catch {}
       setCoachMode(route);
 
-      // 2. Build prompt for routed agent
-      const prompt = buildCoachPrompt(memories, route);
+      // 2. Context hydration — extract entities, resolve against local data (Haiku, non-blocking on failure)
+      let ctx = '';
+      try {
+        const extractedRaw = await apiCall(M.fast, CONTEXT_EXTRACTOR_P, msg, 150);
+        const extracted = parseJ(extractedRaw) || {};
+        ctx = hydrateContext(extracted, contacts, opps, kanban);
+      } catch {}
+
+      // 3. Build prompt for routed agent (with hydrated context)
+      const prompt = buildCoachPrompt(memories, route, ctx);
       const reply = await apiCall(M.main, prompt, history.map(m=>`${m.role==='user'?'User':'Coach'}: ${m.content}`).join('\n\n'), 1000);
       const final = [...history, {role:'assistant', content:reply}];
       setMessages(final);
@@ -1769,7 +1837,8 @@ function SAFWAISidekick() {
       {/* ── KANBAN / ACTIONS TAB ── */}
       {tab==='kanban'&&(
         <KanbanTab kanban={kanban} setKanban={setKanban} contacts={contacts} opps={opps}
-          setPreviousTab={setPreviousTab} setDetail={setDetail} setEditing={setEditing}/>
+          setPreviousTab={setPreviousTab} setDetail={setDetail} setEditing={setEditing}
+          setTab={setTab} setInput={setInput} setCoachMode={setCoachMode}/>
       )}
 
 
