@@ -115,7 +115,7 @@ const buildCoachPrompt = (mems, mode, ctx='') => {
   const cb = ctx ? `\n${ctx}\n` : '';
   if (mode === 'taskbreaker') return `You are a task paralysis specialist. One job: the tiniest possible first move.\n\n${JC}${mb}\nFormula:\n1. One sentence acknowledging the paralysis — make him feel seen\n2. THE single smallest first step — so specific it almost feels silly\n3. One sentence on why starting beats finishing\nMax 5 sentences. Movement only.`;
   if (mode === 'braindump') return `You are a brain organiser. Transform mental chaos into clarity.\n\n${JC}${mb}\nALWAYS use this format:\n\n**Heard:** [core chaos in one sentence]\n\n**What matters today:**\n• [item 1]\n• [item 2]\n• [item 3 — only if urgent]\n\n**Batch or delegate:** [1-2 items that don't need your direct attention — or "None today"]\n\n**Start here →** [one concrete first action]`;
-  return `You are Jeroen's personal coach and business advisor. Warm, sharp, genuinely invested.\n\n${JC}${mb}${cb}\nPrinciples:\n→ Different operating system, not defective — task paralysis is neurological, not weakness\n→ 54-year late diagnosis = a lifetime of confusion now making sense\n→ If an email or content is shared, recommend next steps AND flag CRM relevance\n\nCRITICAL — be honest about what auto-updates:\n→ Memory insights: YES, extracted automatically after every exchange\n→ Contact next actions + last contact date: YES, updated automatically when a contact is discussed\n→ Pipeline stage changes: YES, if you explicitly mention a deal moving\n→ Project status: YES, if you mention a project progressing\n→ Activities (real-world calls/meetings/emails with people): PARTIAL — detected automatically when user DESCRIBES a real interaction. But if it's unclear, say "I'll add a Log Activity button so you can confirm this in one tap" — do NOT say you logged it if you're not certain.\n\nRespond:\n• SHORT — 3-5 sentences. Busy brain needs brevity.\n• ONE clear action or insight\n• Direct and warm. Zero filler.\n• Never claim to have logged an activity unless the user clearly described a real-world interaction in this message.\n• If you're unsure whether something should be logged as an activity, say so and prompt the user to confirm.`;
+  return `You are Jeroen's personal coach and business advisor. Warm, sharp, genuinely invested.\n\n${JC}${mb}${cb}${cb ? 'IMPORTANT: The context block above was pulled from Jeroen\'s live CRM and Kanban. Use it. Reference it directly in your reply. Do not say you lack access to his data.\n' : ''}\nPrinciples:\n→ Different operating system, not defective — task paralysis is neurological, not weakness\n→ 54-year late diagnosis = a lifetime of confusion now making sense\n→ If an email or content is shared, recommend next steps AND flag CRM relevance\n\nCRITICAL — be honest about what auto-updates:\n→ Memory insights: YES, extracted automatically after every exchange\n→ Contact next actions + last contact date: YES, updated automatically when a contact is discussed\n→ Pipeline stage changes: YES, if you explicitly mention a deal moving\n→ Project status: YES, if you mention a project progressing\n→ Activities (real-world calls/meetings/emails with people): PARTIAL — detected automatically when user DESCRIBES a real interaction. But if it's unclear, say "I'll add a Log Activity button so you can confirm this in one tap" — do NOT say you logged it if you're not certain.\n\nRespond:\n• SHORT — 3-5 sentences. Busy brain needs brevity.\n• ONE clear action or insight\n• Direct and warm. Zero filler.\n• Never claim to have logged an activity unless the user clearly described a real-world interaction in this message.\n• If you're unsure whether something should be logged as an activity, say so and prompt the user to confirm.`;
 };
 
 // ── CONTEXT HYDRATION
@@ -777,9 +777,18 @@ function SAFWAISidekick() {
   const [memories, setMemories] = useState([]);
   const [contacts, setContacts] = useState([]);
   const [opps, setOpps]         = useState([]);
+  const contactsRef = useRef([]);
+  const oppsRef     = useRef([]);
+  const kanbanRef   = useRef([]);
+  const memoriesRef = useRef([]);
   const [projects, setProjects] = useState([]);
   const [interactions, setInteractions] = useState([]);
   const [kanban, setKanban] = useState([]);
+  // Sync refs so send() always reads current data regardless of closure age
+  useEffect(() => { contactsRef.current = contacts; }, [contacts]);
+  useEffect(() => { oppsRef.current = opps; }, [opps]);
+  useEffect(() => { kanbanRef.current = kanban; }, [kanban]);
+  useEffect(() => { memoriesRef.current = memories; }, [memories]);
   const [orchLog, setOrchLog]   = useState([]);
   const [loaded, setLoaded]     = useState(false);
   const [memToast, setMemToast] = useState(false);
@@ -1111,11 +1120,11 @@ function SAFWAISidekick() {
         try {
           const extractedRaw = await apiCall(M.fast, CONTEXT_EXTRACTOR_P, msg, 150);
           const extracted = parseJ(extractedRaw) || {};
-          ctx = hydrateContext(extracted, contacts, opps, kanban);
+          ctx = hydrateContext(extracted, contactsRef.current, oppsRef.current, kanbanRef.current);
           console.log('[hydration] msg:', msg);
           console.log('[hydration] extracted:', extracted);
           console.log('[hydration] ctx:', ctx || '(empty — no matches)');
-          console.log('[hydration] contacts count:', contacts.length, '| opps count:', opps.length, '| kanban count:', kanban.length);
+          console.log('[hydration] contacts count:', contactsRef.current.length, '| opps count:', oppsRef.current.length, '| kanban count:', kanbanRef.current.length);
         } catch(hydErr) { console.error('[hydration] ERROR:', hydErr); }
       }
 
