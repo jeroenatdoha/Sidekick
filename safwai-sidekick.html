@@ -252,9 +252,20 @@ async function sSet(key, val) {
 function parseJ(raw) {
   try { return JSON.parse(raw.replace(/```json|```/g,'').trim()); } catch { return null; }
 }
+function getApiKey() {
+  return localStorage.getItem('safwai-api-key') || '';
+}
 async function apiCall(model, system, user, tokens=800) {
+  const key = getApiKey();
+  if (!key) throw new Error('NO_KEY');
   const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method:"POST", headers:{"Content-Type":"application/json"},
+    method:"POST",
+    headers:{
+      "Content-Type":"application/json",
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true"
+    },
     body: JSON.stringify({ model, max_tokens:tokens, system, messages:[{role:"user",content:user}] })
   });
   if (!r.ok) throw new Error(`API ${r.status}`);
@@ -661,6 +672,8 @@ function AddProjectInput({onAdd}) {
 }
 function SAFWAISidekick() {
   const [tab, setTab]           = useState('coach');
+  const [apiKey, setApiKey]     = useState(() => localStorage.getItem('safwai-api-key') || '');
+  const [apiKeySaved, setApiKeySaved] = useState(!!localStorage.getItem('safwai-api-key'));
   const [coachMode, setCoachMode] = useState('coach');
   const [messages, setMessages] = useState([]);
   const [input, setInput]       = useState('');
@@ -1000,7 +1013,10 @@ function SAFWAISidekick() {
       // Background orchestration — non-blocking
       backgroundOrch(msg, reply, memories, contacts, opps);
     } catch(e) {
-      setMessages([...history, {role:'assistant', content:'Connection issue. Try again.'}]);
+      const msg = e.message === 'NO_KEY'
+        ? '⚠ No API key set. Go to 🧠 Memory tab → Settings to add your Anthropic API key.'
+        : 'Connection issue. Try again.';
+      setMessages([...history, {role:'assistant', content:msg}]);
     } finally { setLoading(false); }
   };
 
@@ -2023,6 +2039,40 @@ function SAFWAISidekick() {
       {tab==='memory'&&(
         <div className="scroll fade">
           <div className="section-title">Memory Bank <span>{memories.length} insights stored</span></div>
+
+          {/* API Key Settings */}
+          <div className="import-box" style={{borderColor:'var(--accent)',background:'rgba(200,144,58,0.05)',marginBottom:'12px'}}>
+            <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--accent)',textTransform:'uppercase',letterSpacing:'1px'}}>🔑 API Key — Required for GitHub Pages</div>
+            <div style={{fontSize:'12px',color:'var(--text-dim)',lineHeight:'1.5',marginBottom:'6px'}}>
+              Enter your Anthropic API key. Stored locally in your browser only — never sent anywhere except Anthropic's API.
+              Get yours at <a href="https://console.anthropic.com/settings/keys" target="_blank" style={{color:'var(--accent)'}}>console.anthropic.com</a>.
+            </div>
+            <div style={{display:'flex',gap:'7px',alignItems:'center'}}>
+              <input
+                type="password"
+                className="minput"
+                style={{flex:1,fontFamily:'var(--fm)'}}
+                value={apiKey}
+                onChange={e=>setApiKey(e.target.value)}
+                placeholder="sk-ant-..."
+              />
+              <button className="mabtn" style={{borderColor:'var(--accent)',color:'var(--accent)',background:'rgba(200,144,58,.1)'}}
+                onClick={()=>{
+                  localStorage.setItem('safwai-api-key', apiKey.trim());
+                  setApiKeySaved(true);
+                  setTimeout(()=>setApiKeySaved(false), 2000);
+                }}>
+                {apiKeySaved ? '✓ Saved!' : 'Save Key'}
+              </button>
+              {apiKey && <button className="mabtn" style={{borderColor:'var(--red)',color:'var(--red)'}}
+                onClick={()=>{localStorage.removeItem('safwai-api-key');setApiKey('');setApiKeySaved(false);}}>
+                Clear
+              </button>}
+            </div>
+            {localStorage.getItem('safwai-api-key') && (
+              <div style={{fontSize:'11px',color:'var(--green)',marginTop:'5px'}}>✓ API key is set — coach is ready</div>
+            )}
+          </div>
           <div style={{fontSize:'12px',color:'var(--text-dim)',lineHeight:'1.55',marginBottom:'4px'}}>
             Extracted automatically from every coach conversation and inbox process. Injected into every agent session.
           </div>
