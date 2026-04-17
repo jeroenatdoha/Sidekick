@@ -92,8 +92,8 @@ const SK = {
    MODELS
 ═══════════════════════════════════════════════════════════════ */
 const M = {
-  main:  'claude-sonnet-4-6',           // Coach conversations
-  fast:  'claude-haiku-4-5-20251001'    // Background agents
+  main:  'claude-3-5-sonnet-20241022',   // Coach conversations
+  fast:  'claude-3-haiku-20240307'       // Background agents
 };
 
 /* ═══════════════════════════════════════════════════════════════
@@ -673,7 +673,7 @@ function AddProjectInput({onAdd}) {
 function SAFWAISidekick() {
   const [tab, setTab]           = useState('coach');
   const [apiKey, setApiKey]     = useState(() => localStorage.getItem('safwai-api-key') || '');
-  const [apiKeySaved, setApiKeySaved] = useState(!!localStorage.getItem('safwai-api-key'));
+  const [apiKeySaved, setApiKeySaved] = useState(false);
   const [coachMode, setCoachMode] = useState('coach');
   const [messages, setMessages] = useState([]);
   const [input, setInput]       = useState('');
@@ -1014,8 +1014,8 @@ function SAFWAISidekick() {
       backgroundOrch(msg, reply, memories, contacts, opps);
     } catch(e) {
       const msg = e.message === 'NO_KEY'
-        ? '⚠ No API key set. Go to 🧠 Memory tab → Settings to add your Anthropic API key.'
-        : 'Connection issue. Try again.';
+        ? '⚠ No API key set. Go to 🧠 Memory tab to add your Anthropic API key.'
+        : `Connection issue (${e.message}). Try again.`;
       setMessages([...history, {role:'assistant', content:msg}]);
     } finally { setLoading(false); }
   };
@@ -2039,42 +2039,28 @@ function SAFWAISidekick() {
       {tab==='memory'&&(
         <div className="scroll fade">
           <div className="section-title">Memory Bank <span>{memories.length} insights stored</span></div>
+          <div style={{fontSize:'12px',color:'var(--text-dim)',lineHeight:'1.55',marginBottom:'4px'}}>
+            Extracted automatically from every coach conversation and inbox process. Injected into every agent session.
 
-          {/* API Key Settings */}
-          <div className="import-box" style={{borderColor:'var(--accent)',background:'rgba(200,144,58,0.05)',marginBottom:'12px'}}>
-            <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--accent)',textTransform:'uppercase',letterSpacing:'1px'}}>🔑 API Key — Required for GitHub Pages</div>
-            <div style={{fontSize:'12px',color:'var(--text-dim)',lineHeight:'1.5',marginBottom:'6px'}}>
-              Enter your Anthropic API key. Stored locally in your browser only — never sent anywhere except Anthropic's API.
-              Get yours at <a href="https://console.anthropic.com/settings/keys" target="_blank" style={{color:'var(--accent)'}}>console.anthropic.com</a>.
-            </div>
+          {/* API Key */}
+          <div className="import-box" style={{borderColor:'var(--accent)',background:'rgba(200,144,58,0.05)',marginBottom:'10px',marginTop:'8px'}}>
+            <div style={{fontFamily:'var(--fm)',fontSize:'10px',color:'var(--accent)',textTransform:'uppercase',letterSpacing:'1px'}}>🔑 Anthropic API Key</div>
+            <div style={{fontSize:'12px',color:'var(--text-dim)',lineHeight:'1.5',marginBottom:'6px'}}>Required for GitHub Pages. Stored in your browser only.</div>
             <div style={{display:'flex',gap:'7px',alignItems:'center'}}>
-              <input
-                type="password"
-                className="minput"
-                style={{flex:1,fontFamily:'var(--fm)'}}
-                value={apiKey}
+              <input type="password" className="minput" style={{flex:1}} value={apiKey}
                 onChange={e=>setApiKey(e.target.value)}
-                placeholder="sk-ant-..."
-              />
-              <button className="mabtn" style={{borderColor:'var(--accent)',color:'var(--accent)',background:'rgba(200,144,58,.1)'}}
+                placeholder="sk-ant-api03-..."/>
+              <button className="mabtn" style={{borderColor:'var(--accent)',color:'var(--accent)'}}
                 onClick={()=>{
                   localStorage.setItem('safwai-api-key', apiKey.trim());
                   setApiKeySaved(true);
-                  setTimeout(()=>setApiKeySaved(false), 2000);
-                }}>
-                {apiKeySaved ? '✓ Saved!' : 'Save Key'}
-              </button>
-              {apiKey && <button className="mabtn" style={{borderColor:'var(--red)',color:'var(--red)'}}
-                onClick={()=>{localStorage.removeItem('safwai-api-key');setApiKey('');setApiKeySaved(false);}}>
-                Clear
-              </button>}
+                  setTimeout(()=>setApiKeySaved(false),2500);
+                }}>{apiKeySaved?'✓ Saved!':'Save Key'}</button>
+              {apiKey&&<button className="mabtn" style={{borderColor:'var(--red)',color:'var(--red)'}}
+                onClick={()=>{localStorage.removeItem('safwai-api-key');setApiKey('');}}>Clear</button>}
             </div>
-            {localStorage.getItem('safwai-api-key') && (
-              <div style={{fontSize:'11px',color:'var(--green)',marginTop:'5px'}}>✓ API key is set — coach is ready</div>
-            )}
+            {localStorage.getItem('safwai-api-key')&&<div style={{fontSize:'11px',color:'var(--green)',marginTop:'5px'}}>✓ API key is set — coach is ready</div>}
           </div>
-          <div style={{fontSize:'12px',color:'var(--text-dim)',lineHeight:'1.55',marginBottom:'4px'}}>
-            Extracted automatically from every coach conversation and inbox process. Injected into every agent session.
           </div>
 
           {/* Export / Import backup */}
