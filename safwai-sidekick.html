@@ -635,9 +635,16 @@ function KanbanTab({kanban, setKanban, contacts, opps, setPreviousTab, setDetail
   const prioColor = {critical:'#c85a18',high:'#c8903a',medium:'#1e6e30',low:'#8a7a6a'};
 
   const workOnCard = (card) => {
-    const msg = `Work on this task: "${card.title}"${card.notes ? `\n\nContext: ${card.notes}` : ''}`;
+    const linkedContact = card.contactId ? contacts.find(c=>c.id===card.contactId) : null;
+    const linkedOpp = card.oppId ? opps.find(o=>o.id===card.oppId) : null;
+    const lines = ['--- Relevant context for this message ---'];
+    lines.push(`Kanban task [${card.col}]: ${card.title}${card.notes?' — '+card.notes:''}`);
+    if (linkedContact) lines.push(`Contact: ${linkedContact.name}${linkedContact.company?' ('+linkedContact.company+')':''} | Last contact: ${linkedContact.lastContact||'unknown'} | Next action: ${linkedContact.nextAction||'none'}`);
+    if (linkedOpp) lines.push(`Opportunity: ${linkedOpp.name} | Stage: ${linkedOpp.stage||'unknown'} | Value: ${linkedOpp.value?'$'+linkedOpp.value:'unknown'} | Next action: ${linkedOpp.nextAction||'none'}`);
+    lines.push('--- End context ---');
+    setPendingContext(lines.join('\n'));
     setCoachMode('coach');
-    setInput(msg);
+    setInput(`Let's work on: "${card.title}"`);
     setPreviousTab('kanban');
     setTab('coach');
   };
@@ -765,6 +772,7 @@ function SAFWAISidekick() {
   const [coachMode, setCoachMode] = useState('coach');
   const [messages, setMessages] = useState([]);
   const [input, setInput]       = useState('');
+  const [pendingContext, setPendingContext] = useState('');
   const [loading, setLoading]   = useState(false);
   const [memories, setMemories] = useState([]);
   const [contacts, setContacts] = useState([]);
@@ -1093,13 +1101,22 @@ function SAFWAISidekick() {
       } catch {}
       setCoachMode(route);
 
-      // 2. Context hydration — extract entities, resolve against local data (Haiku, non-blocking on failure)
+      // 2. Context hydration — use pre-built context (from card) or extract from message
       let ctx = '';
-      try {
-        const extractedRaw = await apiCall(M.fast, CONTEXT_EXTRACTOR_P, msg, 150);
-        const extracted = parseJ(extractedRaw) || {};
-        ctx = hydrateContext(extracted, contacts, opps, kanban);
-      } catch {}
+      if (pendingContext) {
+        ctx = pendingContext;
+        setPendingContext('');
+      } else {
+        try {
+          const extractedRaw = await apiCall(M.fast, CONTEXT_EXTRACTOR_P, msg, 150);
+          const extracted = parseJ(extractedRaw) || {};
+          ctx = hydrateContext(extracted, contacts, opps, kanban);
+          console.log('[hydration] msg:', msg);
+          console.log('[hydration] extracted:', extracted);
+          console.log('[hydration] ctx:', ctx || '(empty — no matches)');
+          console.log('[hydration] contacts count:', contacts.length, '| opps count:', opps.length, '| kanban count:', kanban.length);
+        } catch(hydErr) { console.error('[hydration] ERROR:', hydErr); }
+      }
 
       // 3. Build prompt for routed agent (with hydrated context)
       const prompt = buildCoachPrompt(memories, route, ctx);
