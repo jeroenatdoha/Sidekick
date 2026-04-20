@@ -344,7 +344,13 @@ function parseJ(raw) {
 function getApiKey() {
   return localStorage.getItem('safwai-api-key') || '';
 }
-async function apiCall(model, system, user, tokens=800) {
+/* ═══════════════════════════════════════════════════════════════
+   apiCall — accepts string OR content-block array
+   Back-compat contract (coding-practices §6): every existing Haiku
+   agent passes strings; new multimodal paths pass arrays directly.
+═══════════════════════════════════════════════════════════════ */
+async function apiCall(model, system, content, tokens=800) {
+  if (typeof content === 'string') content = [{type:'text', text: content}];
   const key = getApiKey();
   if (!key) throw new Error('NO_KEY');
   const r = await fetch("https://api.anthropic.com/v1/messages", {
@@ -355,12 +361,50 @@ async function apiCall(model, system, user, tokens=800) {
       "anthropic-version": "2023-06-01",
       "anthropic-dangerous-direct-browser-access": "true"
     },
-    body: JSON.stringify({ model, max_tokens:tokens, system, messages:[{role:"user",content:user}] })
+    body: JSON.stringify({ model, max_tokens:tokens, system, messages:[{role:"user",content}] })
   });
   if (!r.ok) throw new Error(`API ${r.status}`);
   const d = await r.json();
-  return d.content?.[0]?.text?.trim() || '';
+  // Concatenate all text blocks (model may return >1)
+  const parts = (d.content || []).filter(b => b.type === 'text').map(b => b.text || '');
+  return parts.join('').trim();
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   MULTIMODAL CONTENT ASSEMBLER — Phase 1
+   Order: text → images → documents. Skip empties.
+═══════════════════════════════════════════════════════════════ */
+function buildContent({text, images = [], pdfs = []}) {
+  const blocks = [];
+  if (text) blocks.push({type:'text', text});
+  for (const img of images) blocks.push({
+    type:'image',
+    source:{type:'base64', media_type: img.mime, data: img.base64}
+  });
+  for (const pdf of pdfs) blocks.push({
+    type:'document',
+    source:{type:'base64', media_type:'application/pdf', data: pdf.base64}
+  });
+  return blocks;
+}
+
+/* File → base64 (strips data: prefix). Used by paste handler and file picker. */
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      const comma = typeof result === 'string' ? result.indexOf(',') : -1;
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
+    reader.readAsDataURL(file);
+  });
+}
+
+/* Hard file-size guards per coding-practices §6 */
+const IMG_MAX_BYTES = 20 * 1024 * 1024; // 20 MB per image
+const PDF_MAX_BYTES = 32 * 1024 * 1024; // 32 MB per PDF
 
 /* ═══════════════════════════════════════════════════════════════
    HELPERS
@@ -486,6 +530,16 @@ const CSS = `
   .mode-sel.active{color:var(--accent);background:var(--accent-glow);border-color:var(--accent-dim)}
   .clr-btn{background:none;border:none;color:var(--text-muted);font-family:var(--fm);font-size:10px;cursor:pointer;margin-left:auto;transition:color .15s;padding:5px;flex-shrink:0}
   .clr-btn:hover{color:var(--accent)}
+
+  /* Phase 1 — multimodal attach UI */
+  .attach{width:44px;height:44px;border-radius:12px;background:none;border:1px solid var(--border);color:var(--text-muted);font-size:22px;font-weight:300;cursor:pointer;flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:all .15s;-webkit-tap-highlight-color:transparent;padding:0;line-height:1}
+  .attach:hover{border-color:var(--accent-dim);color:var(--accent)}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+  .chip{display:inline-flex;align-items:center;gap:4px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:4px 4px 4px 10px;font-family:var(--fm);font-size:11px;color:var(--text);max-width:260px;overflow:hidden}
+  .chip-size{color:var(--text-muted);font-size:10px;margin-left:2px}
+  .chip-x{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;line-height:1;padding:0 6px;display:inline-flex;align-items:center;border-radius:6px;transition:all .15s}
+  .chip-x:hover{color:var(--accent);background:var(--accent-glow)}
+  .chip-err{background:rgba(200,90,24,.08);border:1px solid rgba(200,90,24,.25);border-radius:8px;padding:6px 10px;font-family:var(--fm);font-size:11px;color:#c05a18;margin-bottom:8px;line-height:1.4}
 
   /* Cards — more padding for touch */
   .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;transition:all .15s}
@@ -806,6 +860,10 @@ function SAFWAISidekick() {
   const [messages, setMessages] = useState([]);
   const [input, setInput]       = useState('');
   const [pendingContext, setPendingContext] = useState('');
+  // ── Phase 1 — multimodal attachments (turn-scoped, cleared on send)
+  const [pendingImages, setPendingImages] = useState([]); // [{name, mime, base64, size}]
+  const [pendingPdfs, setPendingPdfs]     = useState([]); // [{name, base64, size}]
+  const [attachError, setAttachError]     = useState('');
   const [loading, setLoading]   = useState(false);
   const [memories, setMemories] = useState([]);
   const [contacts, setContacts] = useState([]);
@@ -854,6 +912,7 @@ function SAFWAISidekick() {
   const [pendingActivity, setPendingActivity] = useState(null); // {description, contactName, type}
   const bottomRef = useRef(null);
   const taRef     = useRef(null);
+  const fileInputRef = useRef(null); // Phase 1 — hidden file picker
 
   // Load all data on mount
   useEffect(() => {
@@ -888,6 +947,59 @@ function SAFWAISidekick() {
     taRef.current.style.height = 'auto';
     taRef.current.style.height = Math.min(taRef.current.scrollHeight, window.innerHeight * 0.6) + 'px';
   };
+
+  // ── MULTIMODAL HANDLERS — Phase 1
+  // Validates, base64-encodes, and queues a single file for the next send().
+  const addFile = async (file) => {
+    if (!file) return;
+    try {
+      if (file.type && file.type.startsWith('image/')) {
+        if (file.size > IMG_MAX_BYTES) {
+          setAttachError(`${file.name}: image too large (${(file.size/1024/1024).toFixed(1)}MB). Max 20MB. Route via Cowork.`);
+          setTimeout(() => setAttachError(''), 6000);
+          return;
+        }
+        const base64 = await fileToBase64(file);
+        setPendingImages(prev => [...prev, {name: file.name || 'pasted-image', mime: file.type, base64, size: file.size}]);
+      } else if (file.type === 'application/pdf') {
+        if (file.size > PDF_MAX_BYTES) {
+          setAttachError(`${file.name}: PDF too large (${(file.size/1024/1024).toFixed(1)}MB). Max 32MB / 100 pages. Route via Cowork.`);
+          setTimeout(() => setAttachError(''), 6000);
+          return;
+        }
+        const base64 = await fileToBase64(file);
+        setPendingPdfs(prev => [...prev, {name: file.name || 'document.pdf', base64, size: file.size}]);
+      } else {
+        setAttachError(`${file.name || 'file'}: unsupported type (${file.type || 'unknown'}). Use image/* or application/pdf. Convert .docx → PDF in Word first.`);
+        setTimeout(() => setAttachError(''), 6000);
+      }
+    } catch (err) {
+      console.error('[attach] ERROR:', err);
+      setAttachError(`Failed to attach ${file.name || 'file'}: ${err.message}`);
+      setTimeout(() => setAttachError(''), 6000);
+    }
+  };
+
+  const onFilePick = async (e) => {
+    const files = Array.from(e.target.files || []);
+    for (const f of files) await addFile(f);
+    // Reset so the same file can be picked again after removal
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const onPaste = async (e) => {
+    const items = Array.from((e.clipboardData && e.clipboardData.items) || []);
+    const fileItems = items.filter(it => it.kind === 'file');
+    if (fileItems.length === 0) return; // plain-text paste → default behavior
+    e.preventDefault();
+    for (const it of fileItems) {
+      const file = it.getAsFile();
+      if (file) await addFile(file);
+    }
+  };
+
+  const removeImage = (idx) => setPendingImages(prev => prev.filter((_,i) => i !== idx));
+  const removePdf   = (idx) => setPendingPdfs(prev => prev.filter((_,i) => i !== idx));
 
   // ── SAVE chat history to storage
   const saveChat = async (mode, msgs) => {
@@ -1125,8 +1237,22 @@ function SAFWAISidekick() {
   // ── SEND — auto-routes to right agent via orchestrator
   const send = async (text) => {
     const msg = (text || input).trim();
-    if (!msg || loading) return;
-    const userMsg = {role:'user', content:msg};
+    // Phase 1 — snapshot attachments BEFORE clearing, then clear UNCONDITIONALLY
+    // (coding-practices §6: pendingImages/pendingPdfs clear at start of every send)
+    const imgsForThisSend = pendingImages;
+    const pdfsForThisSend = pendingPdfs;
+    setPendingImages([]);
+    setPendingPdfs([]);
+    const hasAttachments = imgsForThisSend.length > 0 || pdfsForThisSend.length > 0;
+    if ((!msg && !hasAttachments) || loading) return;
+
+    // Compose the user-visible message (attachments shown as inline chip labels)
+    const attachLabels = [
+      ...imgsForThisSend.map(i => `📎 ${i.name}`),
+      ...pdfsForThisSend.map(p => `📎 ${p.name}`)
+    ].join('  ');
+    const displayMsg = msg || '(attachments only)';
+    const userMsg = {role:'user', content: attachLabels ? `${displayMsg}\n${attachLabels}` : displayMsg};
     const history = [...messages, userMsg];
     setMessages(history);
     setInput('');
@@ -1134,10 +1260,11 @@ function SAFWAISidekick() {
     setLoading(true);
 
     try {
-      // 1. Route to correct agent (fast, Haiku)
+      // 1. Route to correct agent (fast, Haiku) — text only
       let route = 'coach';
       try {
-        const routeRaw = await apiCall(M.fast, ROUTER_P, msg, 10);
+        const routeInput = msg || '(attachments only — analyze the attached files)';
+        const routeRaw = await apiCall(M.fast, ROUTER_P, routeInput, 10);
         const r = routeRaw.trim().toLowerCase();
         if (['coach','taskbreaker','braindump'].includes(r)) route = r;
       } catch {}
@@ -1149,7 +1276,7 @@ function SAFWAISidekick() {
       setPendingContext(''); // always clear, whether used or not
       if (resolvedContext) {
         ctx = resolvedContext;
-      } else {
+      } else if (msg) { // skip extractor on attachment-only sends (nothing to extract)
         try {
           const extractedRaw = await apiCall(M.fast, CONTEXT_EXTRACTOR_P, msg, 150);
           const extracted = parseJ(extractedRaw) || {};
@@ -1161,19 +1288,25 @@ function SAFWAISidekick() {
         } catch(hydErr) { console.error('[hydration] ERROR:', hydErr); }
       }
 
-      // 3. Build prompt for routed agent (with hydrated context)
+      // 3. Build multimodal content for coach call (Sonnet) — text transcript + images + PDFs
       const prompt = buildCoachPrompt(memoriesRef.current, route, ctx);
-      const reply = await apiCall(M.main, prompt, history.map(m=>`${m.role==='user'?'User':'Coach'}: ${m.content}`).join('\n\n'), 1000);
+      const transcript = history.map(m=>`${m.role==='user'?'User':'Coach'}: ${m.content}`).join('\n\n');
+      const coachContent = buildContent({
+        text: transcript,
+        images: imgsForThisSend,
+        pdfs: pdfsForThisSend
+      });
+      const reply = await apiCall(M.main, prompt, coachContent, 1000);
       const final = [...history, {role:'assistant', content:reply}];
       setMessages(final);
       saveChat('coach', final); // always save under 'coach' key — single conversation
-      // Background orchestration — non-blocking
+      // Background orchestration — non-blocking, text only
       backgroundOrch(msg, reply, memoriesRef.current, contactsRef.current, oppsRef.current);
     } catch(e) {
-      const msg = e.message === 'NO_KEY'
+      const errMsg = e.message === 'NO_KEY'
         ? '⚠ No API key set. Go to 🧠 Memory tab to add your Anthropic API key.'
         : `Connection issue (${e.message}). Try again.`;
-      setMessages([...history, {role:'assistant', content:msg}]);
+      setMessages([...history, {role:'assistant', content:errMsg}]);
     } finally { setLoading(false); }
   };
 
@@ -1872,13 +2005,36 @@ function SAFWAISidekick() {
             <div ref={bottomRef}/>
           </div>
           <div className="input-area">
+            {(pendingImages.length > 0 || pendingPdfs.length > 0) && (
+              <div className="chips">
+                {pendingImages.map((img, i) => (
+                  <span key={`img-${i}`} className="chip">
+                    🖼 {img.name} <span className="chip-size">({(img.size/1024).toFixed(0)} KB)</span>
+                    <button className="chip-x" onClick={()=>removeImage(i)} aria-label="Remove image">×</button>
+                  </span>
+                ))}
+                {pendingPdfs.map((pdf, i) => (
+                  <span key={`pdf-${i}`} className="chip">
+                    📄 {pdf.name} <span className="chip-size">({(pdf.size/1024/1024).toFixed(1)} MB)</span>
+                    <button className="chip-x" onClick={()=>removePdf(i)} aria-label="Remove PDF">×</button>
+                  </span>
+                ))}
+              </div>
+            )}
+            {attachError && <div className="chip-err">{attachError}</div>}
             <div className="input-row">
+              <input ref={fileInputRef} type="file" accept="image/*,application/pdf" multiple
+                style={{display:'none'}} onChange={onFilePick}/>
+              <button className="attach" onClick={()=>fileInputRef.current && fileInputRef.current.click()}
+                title="Attach image or PDF (or paste into the textbox)" aria-label="Attach file">＋</button>
               <textarea ref={taRef} className="ta" value={input}
                 onChange={e=>{setInput(e.target.value);resize();}}
                 onKeyDown={onKey}
-                placeholder="Talk to your coach, share an email, ask about a contact... CRM + memory update automatically."
+                onPaste={onPaste}
+                placeholder="Talk to your coach, share an email, paste an image, attach a PDF... CRM + memory update automatically."
                 rows={1}/>
-              <button className="send" onClick={()=>send()} disabled={!input.trim()||loading}>→</button>
+              <button className="send" onClick={()=>send()}
+                disabled={(!input.trim() && pendingImages.length===0 && pendingPdfs.length===0) || loading}>→</button>
             </div>
             <div className="irow2">
               {messages.length>0&&<button className="clr-btn" onClick={async()=>{
